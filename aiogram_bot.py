@@ -23,7 +23,7 @@ class FeedbackStates(StatesGroup):
 load_dotenv()
 bot_token = os.getenv("BOT_TOKEN")
 
-bot = Bot(token="BOT_TOKEN", default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+bot = Bot(token=bot_token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher(storage=MemoryStorage())
 
 def save_to_json(data: dict):
