@@ -10,6 +10,8 @@ from aiogram.enums import ParseMode
 from aiogram.utils.keyboard import ReplyKeyboardBuilder
 from aiogram.client.default import DefaultBotProperties
 from dotenv import load_dotenv
+import logging
+logging.basicConfig(level=logging.INFO)
 
 class FeedbackStates(StatesGroup):
     gender = State()
@@ -150,23 +152,15 @@ async def process_disliked(message: types.Message, state: FSMContext):
     await state.clear()
 
 # ================= ЗАПУСК БОТА =================
-# Запуск бота
 async def main():
-    await dp.start_polling(bot)
+    while True:
+        try:
+            logging.info("Запуск бота...")
+            await dp.start_polling(bot)
+        except Exception as e:
+            logging.error(f"Ошибка: {e}. Перезапуск через 10 секунд...")
+            await asyncio.sleep(10)
 
-# Запуск бота в зависимости от среды
 if __name__ == '__main__':
-    import asyncio
-
-    try:
-        # Проверяем, есть ли уже запущенный цикл событий
-        loop = asyncio.get_event_loop()
-        if loop.is_running():
-            # Если цикл уже запущен, используем create_task
-            loop.create_task(main())
-        else:
-            # Если цикла нет, используем asyncio.run
-            asyncio.run(main())
-    except RuntimeError as e:
-        # Обработка ошибок, если что-то пошло не так
-        logging.error(f"Ошибка при запуске бота: {e}")
+    logging.basicConfig(level=logging.INFO)
+    asyncio.run(main())
