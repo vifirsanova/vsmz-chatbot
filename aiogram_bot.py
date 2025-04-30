@@ -37,7 +37,8 @@ def save_to_json(data: dict):
         print(f"Error saving data: {e}")
 
 @dp.message(F.text == "/start")
-async def start_feedback(message: types.Message):
+async def start_feedback(message: types.Message, state: FSMContext):
+    await state.clear()
     builder = ReplyKeyboardBuilder()
     builder.add(types.KeyboardButton(text="Начать опрос"))
 
