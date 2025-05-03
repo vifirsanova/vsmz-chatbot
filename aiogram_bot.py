@@ -107,7 +107,7 @@ class Feedback(Base):
     last_activity = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     status = Column(String, default='in_progress')  # 'in_progress', 'completed', 'abandoned'
     gender = Column(String)
-    age = Column(Integer)
+    age_group = Column(String)
     home_city = Column(String)
     visited_city = Column(String)
     visited_events = Column(Text)
@@ -121,7 +121,7 @@ Base.metadata.create_all(engine)
 class FeedbackStates(StatesGroup):
     initial = State()
     gender = State()
-    age = State()
+    age_group = State()
     home_city = State()
     visited_city = State()
     visited_events = State()
@@ -206,8 +206,8 @@ class DatabaseManager:
             
             if feedback.gender is None:
                 return "Укажите ваш пол:"
-            elif feedback.age is None:
-                return "Укажите ваш возраст:"
+            elif feedback.age_group is None:
+                return "Укажите вашу возрастную группу:"
             elif feedback.home_city is None:
                 return "Из какого вы города?"
             elif feedback.visited_city is None:
@@ -342,7 +342,7 @@ class DatabaseManager:
                 
             with open(filename, 'w', newline='', encoding='utf-8') as csvfile:
                 fieldnames = [
-                    'id', 'timestamp', 'gender', 'age', 
+                    'id', 'timestamp', 'gender', 'age_group', 
                     'home_city', 'visited_city', 
                     'visited_events', 'liked', 'disliked'
                 ]
@@ -354,7 +354,7 @@ class DatabaseManager:
                         'id': feedback.id,
                         'timestamp': feedback.timestamp.isoformat(),
                         'gender': feedback.gender,
-                        'age': feedback.age,
+                        'age_group': feedback.age_group,
                         'home_city': feedback.home_city,
                         'visited_city': feedback.visited_city,
                         'visited_events': feedback.visited_events,
@@ -539,11 +539,17 @@ async def process_gender(message: types.Message, state: FSMContext):
         await message.answer("Произошла ошибка при сохранении данных. Пожалуйста, попробуйте позже.")
         return
     
+    # Создаем клавиатуру с возрастными группами
+    builder = ReplyKeyboardBuilder()
+    for group in ["до 18", "19-25", "26-40", "41-59", "Старше 60"]:
+        builder.add(types.KeyboardButton(text=group))
+    builder.adjust(2)  # Группируем кнопки по 2 в ряд
+
     await message.answer(
-        "Укажите ваш возраст:",
-        reply_markup=types.ReplyKeyboardRemove()
+        "Укажите вашу возрастную группу:",  # Уточняем, что нужна группа, а не точный возраст
+        reply_markup=builder.as_markup(resize_keyboard=True)  # Показываем кнопки
     )
-    await state.set_state(FeedbackStates.age)
+    await state.set_state(FeedbackStates.age_group)  # Переходим в age_group, а не age
     await timeout_manager.set(message.chat.id, state)
 
 @dp.message(FeedbackStates.gender)
@@ -553,34 +559,80 @@ async def wrong_gender(message: types.Message, state: FSMContext):
     await message.answer("Пожалуйста, выберите вариант из кнопок ниже")
     await timeout_manager.set(message.chat.id, state)
 
-@dp.message(FeedbackStates.age)
-async def process_age(message: types.Message, state: FSMContext):
+def get_age_group(text: str) -> tuple[str | None, str | None]:
+    """Определяет группу из текста. Возвращает (группа, ошибка)."""
+    # Ищем целые числа, включая отрицательные
+    numbers = re.findall(r'-?\d+', text)  # Изменено на -?\d+
+    if not numbers:
+        return None, None
+    
+    try:
+        age = int(numbers[0])
+    except ValueError:
+        return None, None
+    
+    if age <= 0:
+        return None, "Пожалуйста, укажите свой настоящий возраст"
+    elif age > 120:
+        return None, "Пожалуйста, укажите свой настоящий возраст"
+    
+    if age <= 18:
+        return "до 18", None
+    elif 19 <= age <= 25:
+        return "19-25", None
+    elif 26 <= age <= 40:
+        return "26-40", None
+    elif 41 <= age <= 59:
+        return "41-59", None
+    else:
+        return "Старше 60", None
+
+@dp.message(FeedbackStates.age_group)
+async def process_age_group(message: types.Message, state: FSMContext):
     if await check_mat_and_respond(message, state):
         return
+
     user_data = await state.get_data()
     feedback_id = user_data.get("feedback_id")
-    
+
     if not feedback_id:
-        await message.answer("Ошибка сессии. Пожалуйста, начните опрос заново (/start).")
-        return
-    
-    if not message.text.isdigit():
-        await message.answer("Пожалуйста, введите возраст числом:")
-        await timeout_manager.set(message.chat.id, state)
+        await message.answer("Ошибка сессии. Пожалуйста, начните заново (/start).")
         return
 
-    age = int(message.text)
-    if not 1 <= age <= 120:
-        await message.answer("Введите реальный возраст (1-120):")
-        await timeout_manager.set(message.chat.id, state)
-        return
+    # Создаем клавиатуру (на случай, если ввод некорректный)
+    builder = ReplyKeyboardBuilder()
+    for group in ["до 18", "19-25", "26-40", "41-59", "Старше 60"]:
+        builder.add(types.KeyboardButton(text=group))
+    builder.adjust(2)
 
-    success = await db_manager.update_feedback(feedback_id, "age", age)
+    # Если пользователь выбрал кнопку
+    if message.text in ["до 18", "19-25", "26-40", "41-59", "Старше 60"]:
+        age_group = message.text
+    else:
+        # Пытаемся распознать возраст из текста ("мне 25" → "19-25")
+        age_group, error_msg = get_age_group(message.text)
+
+        if error_msg:  # Если ввели 0, 999 и т.д.
+            await message.answer(error_msg, reply_markup=builder.as_markup())
+            return
+
+        if not age_group:  # Если не распознано
+            await message.answer(
+                "Пожалуйста, выберите возрастную группу из кнопок ниже:",
+                reply_markup=builder.as_markup()
+            )
+            return
+
+    # Сохраняем группу и переходим к следующему вопросу
+    success = await db_manager.update_feedback(feedback_id, "age_group", age_group)
     if not success:
-        await message.answer("Произошла ошибка при сохранении данных. Пожалуйста, попробуйте позже.")
+        await message.answer("Ошибка сохранения. Попробуйте позже.")
         return
-    
-    await message.answer("Из какого вы города?")
+
+    await message.answer(
+        "Из какого вы города?",
+        reply_markup=types.ReplyKeyboardRemove()  # Убираем кнопки для следующего вопроса
+    )
     await state.set_state(FeedbackStates.home_city)
     await timeout_manager.set(message.chat.id, state)
 
@@ -784,7 +836,7 @@ async def log_database_state():
             logging.info(
                 f"ID: {r.id}, Статус: {r.status}, "
                 f"Последняя активность: {r.last_activity}, "
-                f"Данные: пол={r.gender or '-'}, возраст={r.age or '-'}"
+                f"Данные: пол={r.gender or '-'}, возраст={r.age_group or '-'}"
             )
         logging.info("=== КОНЕЦ ОТЧЕТА ===")
 
