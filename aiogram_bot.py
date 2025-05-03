@@ -2,6 +2,7 @@ import asyncio
 import os
 import logging
 from datetime import datetime, timedelta
+from typing import Optional, Set, Dict
 from functools import lru_cache
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.fsm.storage.memory import MemoryStorage
@@ -13,8 +14,10 @@ from aiogram.client.default import DefaultBotProperties
 from dotenv import load_dotenv
 import csv
 import re
+import json
 from pymorphy3 import MorphAnalyzer
 from transliterate import translit, detect_language
+from pathlib import Path
 
 # SQLAlchemy
 from sqlalchemy import create_engine, Column, Integer, String, Text, DateTime
@@ -95,6 +98,30 @@ MAT_RESPONSES = [
     "У нас принято выражаться вежливо. Давайте без грубостей.",
     "Такие выражения недопустимы. Пожалуйста, следите за речью."
 ]
+
+def load_city_dictionary(filename: str = "output_names.json") -> Set[str]:
+    """Загружает и нормализует словарь городов из JSON-файла."""
+    try:
+        with open(filename, 'r', encoding='utf-8') as file:
+            data = json.load(file)
+            cities = set()
+            for city in data["names"]:
+                # Нормализуем каждое название и его части (для составных названий)
+                parts = re.split(r'[-–\s]', city)  # Разбиваем по дефисам и пробелам
+                for part in parts:
+                    if part:  # Игнорируем пустые строки
+                        normalized = normalize_word(part.lower())
+                        cities.add(normalized)
+                # Добавляем полное название (для "Нью-Йорк" → "нью-йорк")
+                full_normalized = normalize_word(city.lower().replace(' ', '-'))
+                cities.add(full_normalized)
+            return cities
+    except (FileNotFoundError, json.JSONDecodeError, KeyError) as e:
+        logging.error(f"Ошибка загрузки словаря городов: {e}")
+        return set()
+
+# Инициализация при старте бота
+WORLD_CITIES = load_city_dictionary()
 
 # Настройка базы данных
 Base = declarative_base()
@@ -330,7 +357,7 @@ class DatabaseManager:
             session.close()
    
     async def export_to_csv(self, filename: str = "feedback.csv") -> bool:
-        """Экспортирует завершенные опросы в CSV"""
+        """Экспортирует завершенные опросы в CSV с обработкой home_city"""
         session = self.session_factory()
         try:
             feedbacks = session.query(Feedback).filter(
@@ -350,13 +377,16 @@ class DatabaseManager:
                 writer.writeheader()
                 
                 for feedback in feedbacks:
+                    # Обрабатываем только home_city
+                    home_city = get_nominative_city_name(feedback.home_city) if feedback.home_city else None
+                    
                     writer.writerow({
                         'id': feedback.id,
                         'timestamp': feedback.timestamp.isoformat(),
                         'gender': feedback.gender,
                         'age_group': feedback.age_group,
-                        'home_city': feedback.home_city,
-                        'visited_city': feedback.visited_city,
+                        'home_city': home_city,  # Обработанное название
+                        'visited_city': feedback.visited_city,  # Оригинал как есть
                         'visited_events': feedback.visited_events,
                         'liked': feedback.liked,
                         'disliked': feedback.disliked
@@ -636,35 +666,162 @@ async def process_age_group(message: types.Message, state: FSMContext):
     await state.set_state(FeedbackStates.home_city)
     await timeout_manager.set(message.chat.id, state)
 
+STOP_WORDS = {"из", "в", "город", "приехал", "живу", "родом", "еду", "прибыл", "прибыла", "приехала"}
+MIN_CITY_LENGTH = 2
+
+def get_nominative_city_name(city_name: str) -> str:
+    """Приводит город к именительному падежу, сохраняя стандартные правила написания."""
+    if not city_name:
+        return city_name
+
+    # Разбиваем на слова и разделители (дефисы/пробелы)
+    parts = re.split(r'([- ])', city_name)
+    processed_parts = []
+
+    for part in parts:
+        if part in ('-', ' '):
+            processed_parts.append(part)
+            continue
+
+        # Приводим слово к нормальной форме (лемме)
+        try:
+            parsed = morph.parse(part)[0]
+            lemma = parsed.normal_form
+        except:
+            lemma = part.lower()
+
+        # Правила регистра:
+        # 1. Если слово было с заглавной (Петербург) → сохраняем capitalize
+        # 2. Если слово было в верхнем регистре (ЙОРК) → capitalize (Йорк)
+        # 3. Иначе → lower (предлоги, частицы)
+        if part == part.upper():
+            processed_part = lemma.capitalize()  # НЬЮ → Нью, ЙОРК → Йорк
+        elif part[0].isupper():
+            processed_part = lemma.capitalize()  # Петербург → Петербург
+        else:
+            processed_part = lemma.lower()  # москва → москва
+
+        processed_parts.append(processed_part)
+
+    # Собираем название обратно
+    result = "".join(processed_parts)
+
+    # Автоматически capitalize после дефиса (санкт-петербург → Санкт-Петербург)
+    if '-' in result:
+        result = re.sub(
+            r'(^|[- ])([а-яёa-z])',
+            lambda m: m.group(1) + m.group(2).upper(),
+            result
+        )
+
+    return result
+
+def extract_city_from_text(text: str) -> Optional[str]:
+    """Извлекает город из текста с надежной обработкой"""
+    logging.info(f"[extract_city_from_text] Начало обработки текста: '{text}'")
+    
+    # Удаляем лишние символы, сохраняя дефисы и пробелы
+    cleaned = re.sub(r'[^\w\s-]', '', text)
+    logging.info(f"[extract_city_from_text] Текст после очистки: '{cleaned}'")
+    
+    words = re.findall(r'[\w-]+', cleaned.lower())
+    logging.info(f"[extract_city_from_text] Все слова: {words}")
+    
+    words = [w for w in words if w not in STOP_WORDS and len(w) >= MIN_CITY_LENGTH]
+    logging.info(f"[extract_city_from_text] Отфильтрованные слова: {words}")
+    
+    # Проверяем варианты от самых длинных к коротким
+    for word_count in range(min(3, len(words)), 0, -1):
+        logging.info(f"[extract_city_from_text] Проверяем комбинации из {word_count} слов")
+        
+        for i in range(len(words) - word_count + 1):
+            current_phrase = words[i:i+word_count]
+            
+            # Вариант с дефисами
+            phrase_hyphen = '-'.join(current_phrase)
+            normalized_hyphen = normalize_word(phrase_hyphen)
+            logging.info(f"[extract_city_from_text] Проверка комбинации: '{phrase_hyphen}' -> нормализовано: '{normalized_hyphen}'")
+            
+            if normalized_hyphen in WORLD_CITIES:
+                # Находим оригинальное написание в тексте
+                match = re.search(re.escape(phrase_hyphen), cleaned, re.IGNORECASE)
+                if match:
+                    original = match.group()
+                    logging.info(f"[extract_city_from_text] Найдено совпадение в словаре: '{original}'")
+                    return get_nominative_city_name(original)
+            
+            # Вариант с пробелами
+            phrase_space = ' '.join(current_phrase)
+            normalized_space = normalize_word(phrase_space.replace(' ', '-'))
+            logging.info(f"[extract_city_from_text] Проверка комбинации: '{phrase_space}' -> нормализовано: '{normalized_space}'")
+            
+            if normalized_space in WORLD_CITIES:
+                match = re.search(re.escape(phrase_space), cleaned, re.IGNORECASE)
+                if match:
+                    original = match.group()
+                    logging.info(f"[extract_city_from_text] Найдено совпадение в словаре: '{original}'")
+                    return get_nominative_city_name(original)
+    
+    logging.warning("[extract_city_from_text] Не удалось найти город в тексте")
+    return None
+
 @dp.message(FeedbackStates.home_city)
 async def process_home_city(message: types.Message, state: FSMContext):
+    logging.info(f"\n[process_home_city] Начало обработки сообщения: '{message.text}'")
+    
     if await check_mat_and_respond(message, state):
+        logging.warning("[process_home_city] Обнаружен мат в сообщении")
         return
+
+    input_text = message.text
+    city = extract_city_from_text(input_text)
+    
+    # Принудительно капитализируем первую букву, даже если город был введен в нижнем регистре
+    if city:
+        city = city[0].upper() + city[1:]  # "москва" -> "Москва"
+    
+    logging.info(f"[process_home_city] Извлеченный город (после капитализации): '{city}'")
+    
+    if not city:
+        logging.warning("[process_home_city] Город не распознан")
+        await message.answer("Не удалось распознать город. Пожалуйста, укажите в формате: «Москва», «Санкт-Петербург»")
+        await timeout_manager.set(message.chat.id, state)
+        return
+
+    # Дополнительная проверка перед сохранением
+    normalized_city = normalize_word(city.lower().replace(' ', '-'))
+    logging.info(f"[process_home_city] Нормализованная форма города: '{normalized_city}'")
+    
+    if normalized_city not in WORLD_CITIES:
+        logging.error(f"[process_home_city] Город не найден в словаре: '{city}' (нормализованный: '{normalized_city}')")
+        await message.answer("Указанный город не найден в списке. Пожалуйста, укажите другой.")
+        return
+
+    # Сохраняем в БД (уже с правильным регистром)
     user_data = await state.get_data()
     feedback_id = user_data.get("feedback_id")
     
     if not feedback_id:
-        await message.answer("Ошибка сессии. Пожалуйста, начните опрос заново (/start).")
+        logging.error("[process_home_city] Не найден feedback_id")
+        await message.answer("Ошибка сессии. Начните заново (/start).")
         return
+
+    logging.info(f"[process_home_city] Сохраняем город '{city}' для feedback_id {feedback_id}")
+    success = await db_manager.update_feedback(feedback_id, "home_city", city)
     
-    if len(message.text) < 2:
-        await message.answer("Название города слишком короткое")
-        await timeout_manager.set(message.chat.id, state)
-        return
-
-    success = await db_manager.update_feedback(feedback_id, "home_city", message.text)
     if not success:
-        await message.answer("Произошла ошибка при сохранении данных. Пожалуйста, попробуйте позже.")
+        logging.error("[process_home_city] Ошибка сохранения в БД")
+        await message.answer("Ошибка сохранения. Попробуйте позже.")
         return
-
+        
+    logging.info("[process_home_city] Успешно сохранено, переходим к следующему вопросу")
+    
+    # Переход к следующему вопросу
     builder = ReplyKeyboardBuilder()
-    cities = ["Владимир", "Суздаль", "Гусь-Хрустальный",
-             "с. Муромцево", "пос. Боголюбово", "Юрьев-Польский"]
-    for city in cities:
-        builder.add(types.KeyboardButton(text=city))
+    for btn in ["Владимир", "Суздаль", "Гусь-Хрустальный", "с. Муромцево", "пос. Боголюбово", "Юрьев-Польский", "Другое"]:
+        builder.add(types.KeyboardButton(text=btn))
     builder.adjust(2)
-    builder.add(types.KeyboardButton(text="Другое"))
-
+    
     await message.answer(
         "Какой город вы посетили?",
         reply_markup=builder.as_markup(resize_keyboard=True)
