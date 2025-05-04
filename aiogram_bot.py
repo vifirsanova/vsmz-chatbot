@@ -29,6 +29,34 @@ logging.basicConfig(level=logging.INFO)
 # Инициализация анализатора
 morph = MorphAnalyzer()
 
+# Словарь для перевода кириллицы в глаголицу
+GLAGOLITIC_MAP = {
+    'а': 'Ⰰ', 'б': 'Ⰱ', 'в': 'Ⰲ', 'г': 'Ⰳ', 'д': 'Ⰴ',
+    'е': 'Ⰵ', 'ё': 'Ⰵ', 'ж': 'Ⰶ', 'з': 'Ⰷ', 'и': 'Ⰻ', 'й': 'Ⰼ',
+    'к': 'Ⰽ', 'л': 'Ⰾ', 'м': 'Ⰿ', 'н': 'Ⱀ', 'о': 'Ⱁ',
+    'п': 'Ⱂ', 'р': 'Ⱃ', 'с': 'Ⱄ', 'т': 'Ⱅ', 'у': 'Ⱆ',
+    'ф': 'Ⱇ', 'х': 'Ⱈ', 'ц': 'Ⱌ', 'ч': 'Ⱍ', 'ш': 'Ⱎ',
+    'щ': 'Ⱋ', 'ъ': 'Ⱏ', 'ы': 'Ⰺ', 'ь': 'Ⱐ', 'ѣ': 'Ⱑ',
+    'э': 'Ⰵ', 'ю': 'Ⱓ', 'я': 'Ⱔ',
+    'А': 'Ⰰ', 'Б': 'Ⰱ', 'В': 'Ⰲ', 'Г': 'Ⰳ', 'Д': 'Ⰴ',
+    'Е': 'Ⰵ', 'Ё': 'Ⰵ', 'Ж': 'Ⰶ', 'З': 'Ⰷ', 'И': 'Ⰻ', 'Й': 'Ⰼ',
+    'К': 'Ⰽ', 'Л': 'Ⰾ', 'М': 'Ⰿ', 'Н': 'Ⱀ', 'О': 'Ⱁ',
+    'П': 'Ⱂ', 'Р': 'Ⱃ', 'С': 'Ⱄ', 'Т': 'Ⱅ', 'У': 'Ⱆ',
+    'Ф': 'Ⱇ', 'Х': 'Ⱈ', 'Ц': 'Ⱌ', 'Ч': 'Ⱍ', 'Ш': 'Ⱎ',
+    'Щ': 'Ⱋ', 'Ъ': 'Ⱏ', 'Ы': 'Ⰺ', 'Ь': 'Ⱐ', 'Ѣ': 'Ⱑ',
+    'Э': 'Ⰵ', 'Ю': 'Ⱓ', 'Я': 'Ⱔ'
+}
+
+def translate_to_glagolitic(text: str) -> str:
+    """Переводит кириллический текст в глаголицу"""
+    result = []
+    for char in text:
+        if char in GLAGOLITIC_MAP:
+            result.append(GLAGOLITIC_MAP[char])
+        else:
+            result.append(char)  # Оставляем эмодзи и другие символы как есть
+    return ''.join(result)
+
 # Кэшируем результаты лемматизации
 @lru_cache(maxsize=5000)
 def normalize_word(word: str) -> str:
@@ -154,6 +182,9 @@ class FeedbackStates(StatesGroup):
     visited_events = State()
     liked = State()
     disliked = State()
+
+class TranslationState(StatesGroup):
+    waiting_for_text = State()
 
 load_dotenv()
 bot_token = os.getenv("BOT_TOKEN")
@@ -421,8 +452,8 @@ async def check_mat_and_respond(message: types.Message, state: FSMContext) -> bo
     user_data = await state.get_data()
     current_state = await state.get_state()
     
-    # Если опрос ещё не начат (initial state)
-    if current_state == FeedbackStates.initial.state:
+    # Если опрос ещё не начат (initial state) или в режиме перевода
+    if current_state in [FeedbackStates.initial.state, TranslationState.waiting_for_text.state]:
         mat_count = user_data.get("mat_count", 0) + 1
         await state.update_data(mat_count=mat_count)
         
@@ -438,13 +469,20 @@ async def check_mat_and_respond(message: types.Message, state: FSMContext) -> bo
         # Отправляем ответ на мат отдельным сообщением
         await message.answer(MAT_RESPONSES[mat_count - 1])
         
-        # Отправляем повтор приглашения отдельным сообщением
-        builder = ReplyKeyboardBuilder()
-        builder.add(types.KeyboardButton(text="Начать опрос"))
-        await message.answer(
-            "Пожалуйста, нажмите кнопку 'Начать опрос', если хотите продолжить.",
-            reply_markup=builder.as_markup(resize_keyboard=True)
-        )
+        # В зависимости от состояния отправляем соответствующее приглашение
+        if current_state == FeedbackStates.initial.state:
+            builder = ReplyKeyboardBuilder()
+            builder.add(types.KeyboardButton(text="Начать опрос"))
+            builder.add(types.KeyboardButton(text="Перевод на глаголицу"))
+            await message.answer(
+                "Пожалуйста, выберите действие:",
+                reply_markup=builder.as_markup(resize_keyboard=True)
+            )
+        elif current_state == TranslationState.waiting_for_text.state:
+            await message.answer(
+                "Введите текст на кириллице для перевода в глаголицу:",
+                reply_markup=types.ReplyKeyboardRemove()
+            )
         return True
     
     # Если опрос уже начат (любое другое состояние)
@@ -522,9 +560,10 @@ async def start_feedback(message: types.Message, state: FSMContext):
     
     builder = ReplyKeyboardBuilder()
     builder.add(types.KeyboardButton(text="Начать опрос"))
+    builder.add(types.KeyboardButton(text="Перевод на глаголицу"))
 
     await message.answer(
-        "Здравствуйте! Спасибо за посещение музея. Нажмите кнопку, чтобы начать опрос.",
+        "Здравствуйте! Спасибо за посещение музея. Выберите действие:",
         reply_markup=builder.as_markup(resize_keyboard=True)
     )
     await state.set_state(FeedbackStates.initial)
@@ -544,6 +583,56 @@ async def start_survey(message: types.Message, state: FSMContext):
         reply_markup=builder.as_markup(resize_keyboard=True)
     )
     await state.set_state(FeedbackStates.gender)
+    await timeout_manager.set(message.chat.id, state)
+
+@dp.message(F.text == "Перевод на глаголицу", FeedbackStates.initial)
+async def start_glagolitic_translation(message: types.Message, state: FSMContext):
+    if await check_mat_and_respond(message, state):
+        return
+    await state.set_state(TranslationState.waiting_for_text)
+    await message.answer(
+        "Введите текст на кириллице для перевода в глаголицу:",
+        reply_markup=types.ReplyKeyboardRemove()
+    )
+    await timeout_manager.set(message.chat.id, state)
+
+@dp.message(F.text == "Перевести ещё", TranslationState.waiting_for_text)
+async def translate_more(message: types.Message, state: FSMContext):
+    if await check_mat_and_respond(message, state):
+        return
+    await state.set_state(TranslationState.waiting_for_text)
+    await message.answer(
+        "Введите текст на кириллице для перевода в глаголицу:",
+        reply_markup=types.ReplyKeyboardRemove()
+    )
+    await timeout_manager.set(message.chat.id, state)
+
+@dp.message(F.text == "Перейти к опросу", TranslationState.waiting_for_text)
+async def switch_to_survey(message: types.Message, state: FSMContext):
+    if await check_mat_and_respond(message, state):
+        return
+    await start_survey(message, state)
+
+@dp.message(TranslationState.waiting_for_text)
+async def handle_glagolitic_translation(message: types.Message, state: FSMContext):
+    if await check_mat_and_respond(message, state):
+        return
+
+        # Проверяем, что текст содержит хотя бы одну кириллическую букву
+    if any(char in GLAGOLITIC_MAP for char in message.text):
+        translated = translate_to_glagolitic(message.text)
+        
+        builder = ReplyKeyboardBuilder()
+        builder.add(types.KeyboardButton(text="Перевести ещё"))
+        builder.add(types.KeyboardButton(text="Перейти к опросу"))
+        
+        await message.answer(
+            f"Перевод на глаголицу:\n\n{translated}",
+            reply_markup=builder.as_markup(resize_keyboard=True)
+        )
+    else:
+        await message.answer("Пожалуйста, введите текст, содержащий кириллические символы.")
+    
     await timeout_manager.set(message.chat.id, state)
 
 @dp.message(FeedbackStates.initial)
