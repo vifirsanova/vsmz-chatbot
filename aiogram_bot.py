@@ -772,18 +772,32 @@ async def switch_to_survey(message: types.Message, state: FSMContext):
         return
     await start_survey(message, state)
 
+@dp.message(F.text == "Завершить разговор", TranslationState.waiting_for_text)
+async def end_conversation(message: types.Message, state: FSMContext):
+    if await check_mat_and_respond(message, state):
+        return
+    
+    await message.answer(
+        "Благодарю за уделенное время! Всего доброго, ждём вас снова!",
+        reply_markup=types.ReplyKeyboardRemove()
+    )
+    await state.clear()
+    await timeout_manager.reset(message.chat.id)
+
 @dp.message(TranslationState.waiting_for_text)
 async def handle_glagolitic_translation(message: types.Message, state: FSMContext):
     if await check_mat_and_respond(message, state):
         return
 
-        # Проверяем, что текст содержит хотя бы одну кириллическую букву
+    # Проверяем, что текст содержит хотя бы одну кириллическую букву
     if any(char in GLAGOLITIC_MAP for char in message.text):
         translated = translate_to_glagolitic(message.text)
         
         builder = ReplyKeyboardBuilder()
         builder.add(types.KeyboardButton(text="Перевести ещё"))
         builder.add(types.KeyboardButton(text="Перейти к опросу"))
+        builder.add(types.KeyboardButton(text="Завершить разговор"))
+        builder.adjust(2)  # Располагаем кнопки по 2 в ряд
         
         await message.answer(
             f"Перевод на глаголицу:\n\n{translated}",
