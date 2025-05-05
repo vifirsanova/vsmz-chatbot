@@ -18,6 +18,7 @@ import json
 from pymorphy3 import MorphAnalyzer
 from transliterate import translit, detect_language
 from pathlib import Path
+from yandex_cloud_ml_sdk import YCloudML
 
 # SQLAlchemy
 from sqlalchemy import create_engine, Column, Integer, String, Text, DateTime
@@ -56,6 +57,29 @@ def translate_to_glagolitic(text: str) -> str:
         else:
             result.append(char)  # Оставляем эмодзи и другие символы как есть
     return ''.join(result)
+
+OFFTOPIC_THEMES = {
+    "who_are_you": {
+        "description": "Кто ты такой? Ты робот?",
+        "response": "Я Митяй (МитAI), гид-исследователь Владимиро-Суздальского музея-заповедника. "
+                   "Собираю обратную связь от посетителей, чтобы помочь стать музею лучше."
+    },
+    "hobby": {
+        "description": "Какое у тебя хобби?",
+        "response": "Я интересуюсь археологией, античными текстами и люблю изготавливать изделия из дерева, "
+                   "особенно наличники."
+    },
+    "about_museum": {
+        "description": "Расскажи о музее",
+        "response": "Владимиро-Суздальский музей-заповедник - это крупный музейный комплекс, "
+                   "включающий памятники архитектуры XII-XIII веков. Подробнее можно узнать на сайте: "
+                   "https://vladmuseum.ru/ru/"
+    },
+    "favorite_food": {
+        "description": "Какая у тебя любимая еда?",
+        "response": "Огурцы! В городе Суздаль ежегодно проходит праздник огурца."
+    }
+}
 
 # Кэшируем результаты лемматизации
 @lru_cache(maxsize=5000)
@@ -188,6 +212,8 @@ class TranslationState(StatesGroup):
 
 load_dotenv()
 bot_token = os.getenv("BOT_TOKEN")
+folder_id = os.getenv("FOLDER_ID")
+auth_token = os.getenv("AUTH_TOKEN")
 
 bot = Bot(token=bot_token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher(storage=MemoryStorage())
@@ -542,8 +568,113 @@ async def check_mat_and_respond(message: types.Message, state: FSMContext) -> bo
         logging.error(f"Ошибка при обработке мата: {e}")
         return False
 
+async def detect_offtopic(text: str, bot_instance: Bot) -> Optional[str]:
+    """Определяет, относится ли текст к оффтопику"""
+    try:
+        # Проверяем, инициализирован ли Yandex Cloud ML
+        if not hasattr(bot_instance, 'assistant') or not bot_instance.assistant:
+            logging.error("Yandex Cloud ML не инициализирован")
+            return None
+
+        logging.info(f"Analyzing text for offtopic: {text}")
+        
+        prompt = f"""
+        Определи, относится ли следующий текст к одному из оффтопных вопросов: {json.dumps({k: v['description'] for k, v in OFFTOPIC_THEMES.items()}, indent=2, ensure_ascii=False)}
+        
+        Формат ответа: JSON с полями is_offtopic (bool) и theme (string, optional)
+        Примеры:
+        - Оффтопик: {{\"is_offtopic\": true, \"theme\": \"who_are_you\"}}
+        - Не оффтопик: {{\"is_offtopic\": false}}
+        
+        Текст для анализа: \"{text}\"
+        """
+        
+        try:
+            # Создаем тред и отправляем запрос
+            thread = bot_instance.sdk.threads.create()
+            thread.write(prompt)
+            run = bot_instance.assistant.run(thread)
+            result = run.wait()
+
+            logging.info(f"Yandex Cloud ML response: {result.text}")
+
+            response_text = result.text.strip()
+            
+            # Удаляем markdown-разметку если есть
+            if response_text.startswith('```') and response_text.endswith('```'):
+                response_text = response_text[3:-3].strip()
+            
+            # Удаляем возможные переносы строк внутри JSON
+            response_text = response_text.replace('\n', ' ')
+            
+            # Пробуем распарсить JSON
+            try:
+                response = json.loads(response_text)
+                if isinstance(response, dict) and response.get("is_offtopic", False):
+                    theme = response.get("theme")
+                    if theme in OFFTOPIC_THEMES:
+                        return theme
+                return None
+            except json.JSONDecodeError as e:
+                # Пробуем найти JSON в тексте ответа
+                json_match = re.search(r'\{.*\}', response_text)
+                if json_match:
+                    try:
+                        response = json.loads(json_match.group())
+                        if isinstance(response, dict) and response.get("is_offtopic", False):
+                            theme = response.get("theme")
+                            if theme in OFFTOPIC_THEMES:
+                                return theme
+                    except json.JSONDecodeError:
+                        logging.error(f"Не удалось распарсить JSON в ответе: {response_text}")
+                        return None
+                logging.error(f"Ответ не содержит валидный JSON: {response_text}")
+                return None
+                
+        except Exception as e:
+            logging.error(f"Ошибка при запросе к Yandex Cloud ML: {e}")
+            return None
+            
+        return None
+
+    except Exception as e:
+        logging.error(f"Error detecting offtopic: {e}", exc_info=True)
+        return None
+
+async def check_offtopic(message: types.Message, state: FSMContext) -> bool:
+    """Проверяет является ли сообщение оффтопным (с отправкой ответа)"""
+    theme = await detect_offtopic(message.text, message.bot)
+    if not theme:
+        return False
+    
+    # Отправляем соответствующий ответ из словаря OFFTOPIC_THEMES
+    await message.answer(OFFTOPIC_THEMES[theme]["response"])
+    
+    # Возвращаем пользователя к предыдущему вопросу или меню
+    current_state = await state.get_state()
+    
+    if current_state == FeedbackStates.initial.state:
+        # В начальном состоянии показываем меню
+        builder = ReplyKeyboardBuilder()
+        builder.add(types.KeyboardButton(text="Начать опрос"))
+        builder.add(types.KeyboardButton(text="Перевод на глаголицу"))
+        await message.answer(
+            "Пожалуйста, выберите действие:",
+            reply_markup=builder.as_markup(resize_keyboard=True))
+    else:
+        # В других состояниях возвращаем текущий вопрос
+        user_data = await state.get_data()
+        feedback_id = user_data.get("feedback_id")
+        if feedback_id:
+            current_question = await db_manager.get_current_question(feedback_id)
+            await message.answer(f"Вернемся к вопросу:\n{current_question}")
+    
+    await timeout_manager.set(message.chat.id, state)
+    return True
+
 @dp.message(F.text == "/start")
 async def start_feedback(message: types.Message, state: FSMContext):
+    # Сброс состояния и таймеров
     await state.update_data(mat_count=0)
     if await check_mat_and_respond(message, state):
         return
@@ -551,23 +682,26 @@ async def start_feedback(message: types.Message, state: FSMContext):
     await state.clear()
     
     try:
+        # Создаём новую запись в БД
         feedback_id = await db_manager.create_feedback()
         await state.update_data(feedback_id=feedback_id)
-    except Exception as e:
-        logging.error(f"Error creating feedback record: {e}")
-        await message.answer("Произошла ошибка. Пожалуйста, попробуйте позже.")
-        return
-    
-    builder = ReplyKeyboardBuilder()
-    builder.add(types.KeyboardButton(text="Начать опрос"))
-    builder.add(types.KeyboardButton(text="Перевод на глаголицу"))
+        
+        # Убираем проверку оффтопика здесь - она теперь в handle_initial_state
+        
+        builder = ReplyKeyboardBuilder()
+        builder.add(types.KeyboardButton(text="Начать опрос"))
+        builder.add(types.KeyboardButton(text="Перевод на глаголицу"))
 
-    await message.answer(
-        "Здравствуйте! Спасибо за посещение музея. Выберите действие:",
-        reply_markup=builder.as_markup(resize_keyboard=True)
-    )
-    await state.set_state(FeedbackStates.initial)
-    await timeout_manager.set(message.chat.id, state)
+        await message.answer(
+            "Здравствуйте! Спасибо за посещение музея. Выберите действие:",
+            reply_markup=builder.as_markup(resize_keyboard=True)
+        )
+        await state.set_state(FeedbackStates.initial)
+        await timeout_manager.set(message.chat.id, state)
+        
+    except Exception as e:
+        logging.error(f"Ошибка при старте опроса: {e}")
+        await message.answer("Произошла ошибка. Пожалуйста, попробуйте позже.")
 
 @dp.message(F.text == "Начать опрос", FeedbackStates.initial)
 async def start_survey(message: types.Message, state: FSMContext):
@@ -595,6 +729,31 @@ async def start_glagolitic_translation(message: types.Message, state: FSMContext
         reply_markup=types.ReplyKeyboardRemove()
     )
     await timeout_manager.set(message.chat.id, state)
+
+@dp.message(FeedbackStates.initial)
+async def handle_initial_state(message: types.Message, state: FSMContext):
+    # 1. Проверка мата
+    if await check_mat_and_respond(message, state):
+        return
+    
+    # 2. Игнорируем кнопки - они уже обработаны выше
+    if message.text in ["Начать опрос", "Перевод на глаголицу"]:
+        return
+    
+    # 3. Проверка оффтопика
+    if await check_offtopic(message, state):
+        await timeout_manager.set(message.chat.id, state)
+        return
+         
+    # 4. Ответ для нераспознанных сообщений
+    builder = ReplyKeyboardBuilder()
+    builder.add(types.KeyboardButton(text="Начать опрос"))
+    builder.add(types.KeyboardButton(text="Перевод на глаголицу"))
+    
+    await message.answer(
+        "Пожалуйста, выберите действие из кнопок ниже:",
+        reply_markup=builder.as_markup(resize_keyboard=True))
+    await timeout_manager.set(message.chat.id, state)        
 
 @dp.message(F.text == "Перевести ещё", TranslationState.waiting_for_text)
 async def translate_more(message: types.Message, state: FSMContext):
@@ -635,13 +794,6 @@ async def handle_glagolitic_translation(message: types.Message, state: FSMContex
     
     await timeout_manager.set(message.chat.id, state)
 
-@dp.message(FeedbackStates.initial)
-async def handle_initial_random(message: types.Message, state: FSMContext):
-    if await check_mat_and_respond(message, state):
-        return
-    await timeout_manager.set(message.chat.id, state)
-    await message.answer("Пожалуйста, нажмите 'Начать опрос'")
-
 @dp.message(FeedbackStates.gender, F.text.in_(["Мужской", "Женский", "Предпочитаю не указывать"]))
 async def process_gender(message: types.Message, state: FSMContext):
     if await check_mat_and_respond(message, state):
@@ -675,6 +827,11 @@ async def process_gender(message: types.Message, state: FSMContext):
 async def wrong_gender(message: types.Message, state: FSMContext):
     if await check_mat_and_respond(message, state):
         return
+    # Добавить проверку на оффтопик
+    if await check_offtopic(message, state):
+        await timeout_manager.set(message.chat.id, state)
+        return
+
     await message.answer("Пожалуйста, выберите вариант из кнопок ниже")
     await timeout_manager.set(message.chat.id, state)
 
@@ -711,6 +868,11 @@ async def process_age_group(message: types.Message, state: FSMContext):
     if await check_mat_and_respond(message, state):
         return
 
+    # Добавить проверку оффтопика перед основной логикой
+    if await check_offtopic(message, state):
+        await timeout_manager.set(message.chat.id, state)
+        return
+
     user_data = await state.get_data()
     feedback_id = user_data.get("feedback_id")
 
@@ -735,7 +897,7 @@ async def process_age_group(message: types.Message, state: FSMContext):
             await message.answer(error_msg, reply_markup=builder.as_markup())
             return
 
-        if not age_group:  # Если не распознано
+        if not age_group:
             await message.answer(
                 "Пожалуйста, выберите возрастную группу из кнопок ниже:",
                 reply_markup=builder.as_markup()
@@ -946,6 +1108,9 @@ async def process_visited_city(message: types.Message, state: FSMContext):
 async def wrong_visited_city(message: types.Message, state: FSMContext):
     if await check_mat_and_respond(message, state):
         return
+    if await check_offtopic(message, state):
+        await timeout_manager.set(message.chat.id, state)
+        return
     builder = ReplyKeyboardBuilder()
     cities = ["Владимир", "Суздаль", "Гусь-Хрустальный",
              "с. Муромцево", "пос. Боголюбово", "Юрьев-Польский"]
@@ -964,6 +1129,11 @@ async def wrong_visited_city(message: types.Message, state: FSMContext):
 async def process_visited_events(message: types.Message, state: FSMContext):
     if await check_mat_and_respond(message, state):
         return
+    # Для открытых вопросов всегда проверяем оффтопик
+    if len(message.text) >= 5:  # Проверяем только достаточно длинные сообщения
+        if await check_offtopic(message, state):
+            await timeout_manager.set(message.chat.id, state)
+            return
     user_data = await state.get_data()
     feedback_id = user_data.get("feedback_id")
     
@@ -989,6 +1159,11 @@ async def process_visited_events(message: types.Message, state: FSMContext):
 async def process_liked(message: types.Message, state: FSMContext):
     if await check_mat_and_respond(message, state):
         return
+    # Для открытых вопросов всегда проверяем оффтопик
+    if len(message.text) >= 5:  # Проверяем только достаточно длинные сообщения
+        if await check_offtopic(message, state):
+            await timeout_manager.set(message.chat.id, state)
+            return
     user_data = await state.get_data()
     feedback_id = user_data.get("feedback_id")
     
@@ -1014,6 +1189,11 @@ async def process_liked(message: types.Message, state: FSMContext):
 async def process_disliked(message: types.Message, state: FSMContext):
     if await check_mat_and_respond(message, state):
         return
+    # Для открытых вопросов всегда проверяем оффтопик
+    if len(message.text) >= 5:  # Проверяем только достаточно длинные сообщения
+        if await check_offtopic(message, state):
+            await timeout_manager.set(message.chat.id, state)
+            return
     user_data = await state.get_data()
     feedback_id = user_data.get("feedback_id")
     
@@ -1095,6 +1275,35 @@ async def main():
         logging.info(f"Стартовая очистка: удалено abandoned записей: {purged}")
     except Exception as e:
         logging.error(f"Ошибка стартовой очистки: {e}")
+
+    try:
+        sdk = YCloudML(folder_id=folder_id, auth=auth_token)
+        logging.info("Yandex Cloud ML SDK initialized successfully")
+        
+        model = sdk.models.completions(f"gpt://{folder_id}/yandexgpt-lite/latest")
+        logging.info(f"Model initialized: {model}")
+        
+        assistant = sdk.assistants.create(model)
+        logging.info(f"Assistant created: {assistant}")
+
+        instruction = """
+        Ты помощник для определения оффтопных вопросов. Твоя задача:
+        1. Определять, относится ли вопрос к одному из 4 типов оффтопика
+        2. Возвращать только ключ темы (who_are_you/hobby/about_museum/favorite_food) или null
+        """
+        assistant.update(instruction=instruction)
+        logging.info("Assistant instruction updated")
+
+        bot.sdk = sdk
+        bot.assistant = assistant
+        bot.model = model
+        logging.info("Yandex Cloud ML successfully configured")
+    except Exception as e:
+        logging.error(f"Ошибка инициализации Yandex Cloud ML: {e}")
+        # Если инициализация не удалась, устанавливаем None
+        bot.sdk = None
+        bot.assistant = None
+
     # Логируем состояние БД при старте
     await log_database_state()
     # Запускаем фоновую задачу очистки

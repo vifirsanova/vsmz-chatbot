@@ -3,4 +3,5 @@ python-dotenv==1.0.0
 sqlalchemy>=2.0.0
 pymorphy3>=1.2.0
 transliterate>=1.12.1
+yandex-cloud-ml-sdk==0.9.1
 
