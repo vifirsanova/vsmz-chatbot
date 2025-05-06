@@ -568,8 +568,8 @@ async def check_mat_and_respond(message: types.Message, state: FSMContext) -> bo
         logging.error(f"Ошибка при обработке мата: {e}")
         return False
 
-async def detect_offtopic(text: str, bot_instance: Bot) -> Optional[str]:
-    """Определяет, относится ли текст к оффтопику"""
+async def detect_offtopic(text: str, bot_instance: Bot) -> Optional[dict]:
+    """Определяет, относится ли текст к оффтопику, и генерирует ответ с помощью LLM."""
     try:
         # Проверяем, инициализирован ли Yandex Cloud ML
         if not hasattr(bot_instance, 'assistant') or not bot_instance.assistant:
@@ -578,7 +578,8 @@ async def detect_offtopic(text: str, bot_instance: Bot) -> Optional[str]:
 
         logging.info(f"Analyzing text for offtopic: {text}")
         
-        prompt = f"""
+        # Определяем тему оффтопика
+        prompt_detect = f"""
         Определи, относится ли следующий текст к одному из оффтопных вопросов: {json.dumps({k: v['description'] for k, v in OFFTOPIC_THEMES.items()}, indent=2, ensure_ascii=False)}
         
         Формат ответа: JSON с полями is_offtopic (bool) и theme (string, optional)
@@ -590,15 +591,15 @@ async def detect_offtopic(text: str, bot_instance: Bot) -> Optional[str]:
         """
         
         try:
-            # Создаем тред и отправляем запрос
-            thread = bot_instance.sdk.threads.create()
-            thread.write(prompt)
-            run = bot_instance.assistant.run(thread)
-            result = run.wait()
+            # Создаем тред и отправляем запрос для определения темы
+            thread_detect = bot_instance.sdk.threads.create()
+            thread_detect.write(prompt_detect)
+            run_detect = bot_instance.assistant.run(thread_detect)
+            result_detect = run_detect.wait()
 
-            logging.info(f"Yandex Cloud ML response: {result.text}")
+            logging.info(f"Yandex Cloud ML response (detect): {result_detect.text}")
 
-            response_text = result.text.strip()
+            response_text = result_detect.text.strip()
             
             # Удаляем markdown-разметку если есть
             if response_text.startswith('```') and response_text.endswith('```'):
@@ -613,8 +614,29 @@ async def detect_offtopic(text: str, bot_instance: Bot) -> Optional[str]:
                 if isinstance(response, dict) and response.get("is_offtopic", False):
                     theme = response.get("theme")
                     if theme in OFFTOPIC_THEMES:
-                        return theme
-                return None
+                        # Генерируем ответ с помощью LLM на основе данных из OFFTOPIC_THEMES
+                        prompt_generate = f"""
+                        Контекст диалога:{text}
+                        Тема: {OFFTOPIC_THEMES[theme]['description']}
+                        Заготовленный ответ: {OFFTOPIC_THEMES[theme]['response']}
+                        
+                        Сгенерируй развернутый и дружелюбный ответ на тему \"{OFFTOPIC_THEMES[theme]['description']}\", используя заготовленный ответ как основу. 
+                        Ответ должен быть естественным и не слишком формальным.
+                        """
+                        
+                        thread_generate = bot_instance.sdk.threads.create()
+                        thread_generate.write(prompt_generate)
+                        run_generate = bot_instance.assistant.run(thread_generate)
+                        result_generate = run_generate.wait()
+
+                        generated_response = result_generate.text.strip()
+                        if generated_response.startswith('```') and generated_response.endswith('```'):
+                            generated_response = generated_response[3:-3].strip()
+
+                        return {
+                            "theme": theme,
+                            "response": generated_response
+                        }
             except json.JSONDecodeError as e:
                 # Пробуем найти JSON в тексте ответа
                 json_match = re.search(r'\{.*\}', response_text)
@@ -624,7 +646,29 @@ async def detect_offtopic(text: str, bot_instance: Bot) -> Optional[str]:
                         if isinstance(response, dict) and response.get("is_offtopic", False):
                             theme = response.get("theme")
                             if theme in OFFTOPIC_THEMES:
-                                return theme
+                                # Генерируем ответ с помощью LLM на основе данных из OFFTOPIC_THEMES
+                                prompt_generate = f"""
+                                Контекст диалога:{text}
+                                Тема: {OFFTOPIC_THEMES[theme]['description']}
+                                Заготовленный ответ: {OFFTOPIC_THEMES[theme]['response']}
+                                
+                                Сгенерируй развернутый и дружелюбный ответ на тему \"{OFFTOPIC_THEMES[theme]['description']}\", используя заготовленный ответ как основу. 
+                                Ответ должен быть естественным и не слишком формальным.
+                                """
+                                
+                                thread_generate = bot_instance.sdk.threads.create()
+                                thread_generate.write(prompt_generate)
+                                run_generate = bot_instance.assistant.run(thread_generate)
+                                result_generate = run_generate.wait()
+
+                                generated_response = result_generate.text.strip()
+                                if generated_response.startswith('```') and generated_response.endswith('```'):
+                                    generated_response = generated_response[3:-3].strip()
+
+                                return {
+                                    "theme": theme,
+                                    "response": generated_response
+                                }
                     except json.JSONDecodeError:
                         logging.error(f"Не удалось распарсить JSON в ответе: {response_text}")
                         return None
@@ -642,13 +686,13 @@ async def detect_offtopic(text: str, bot_instance: Bot) -> Optional[str]:
         return None
 
 async def check_offtopic(message: types.Message, state: FSMContext) -> bool:
-    """Проверяет является ли сообщение оффтопным (с отправкой ответа)"""
-    theme = await detect_offtopic(message.text, message.bot)
-    if not theme:
+    """Проверяет, является ли сообщение оффтопным, и отправляет сгенерированный ответ."""
+    offtopic_data = await detect_offtopic(message.text, message.bot)
+    if not offtopic_data:
         return False
     
-    # Отправляем соответствующий ответ из словаря OFFTOPIC_THEMES
-    await message.answer(OFFTOPIC_THEMES[theme]["response"])
+    # Отправляем сгенерированный ответ
+    await message.answer(offtopic_data["response"])
     
     # Возвращаем пользователя к предыдущему вопросу или меню
     current_state = await state.get_state()
