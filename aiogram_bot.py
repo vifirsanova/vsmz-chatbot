@@ -716,6 +716,78 @@ async def check_offtopic(message: types.Message, state: FSMContext) -> bool:
     await timeout_manager.set(message.chat.id, state)
     return True
 
+async def extract_visited_cities(text: str, bot_instance: Bot) -> list[str]:
+    """Использует LLM для извлечения посещенных городов из текста с фильтрацией"""
+    try:
+        if not hasattr(bot_instance, 'assistant') or not bot_instance.assistant:
+            logging.error("Yandex Cloud ML не инициализирован")
+            return []
+
+        # Разрешенные города музея-заповедника
+        allowed_cities = {
+            "владимир": "Владимир",
+            "суздаль": "Суздаль",
+            "гусь-хрустальный": "Гусь-Хрустальный",
+            "гусь хрустальный": "Гусь-Хрустальный",
+            "муромцево": "с. Муромцево",
+            "боголюбово": "пос. Боголюбово",
+            "юрьев-польский": "Юрьев-Польский",
+            "юрьев польский": "Юрьев-Польский"
+        }
+
+        prompt = f"""
+        Анализируй текст и извлекай названия городов, которые посетил пользователь.
+        Особое внимание удели следующим городам: {', '.join(allowed_cities.values())}.
+        
+        Правила обработки:
+        1. Возвращай только города, явно упомянутые в тексте
+        2. Для составных названий используй точную форму (Гусь-Хрустальный, Юрьев-Польский)
+        3. Для сёл и посёлков указывай приставки (с. Муромцево, пос. Боголюбово)
+        
+        Формат ответа: JSON список строк в lowercase
+        Примеры:
+        - "Был во Владимире и Суздале" → ["владимир", "суздаль"]
+        - "Посетил Москву и Владимир" → ["москва", "владимир"]
+        - "Ездили в с. Муромцево" → ["муромцево"]
+        
+        Текст для анализа: "{text}"
+        """
+
+        thread = bot_instance.sdk.threads.create()
+        thread.write(prompt)
+        run = bot_instance.assistant.run(thread)
+        result = run.wait()
+
+        response_text = result.text.strip()
+        
+        if response_text.startswith('```') and response_text.endswith('```'):
+            response_text = response_text[3:-3].strip()
+        
+        try:
+            # Получаем сырой список городов от LLM
+            raw_cities = json.loads(response_text)
+            if not isinstance(raw_cities, list):
+                return []
+            
+            # Фильтруем и нормализуем города
+            filtered_cities = []
+            for city in raw_cities:
+                lower_city = city.lower().strip()
+                # Ищем точное совпадение с разрешенными городами
+                normalized_city = allowed_cities.get(lower_city, "Другое")
+                if normalized_city not in filtered_cities:
+                    filtered_cities.append(normalized_city)
+            
+            return filtered_cities if filtered_cities else []
+            
+        except json.JSONDecodeError:
+            logging.error(f"Не удалось распарсить JSON: {response_text}")
+            return []
+    
+    except Exception as e:
+        logging.error(f"Ошибка при запросе к Yandex GPT: {e}")
+        return []
+
 @dp.message(F.text == "/start")
 async def start_feedback(message: types.Message, state: FSMContext):
     # Сброс состояния и таймеров
@@ -751,6 +823,8 @@ async def start_feedback(message: types.Message, state: FSMContext):
 async def start_survey(message: types.Message, state: FSMContext):
     if await check_mat_and_respond(message, state):
         return
+    # Сбрасываем флаг подтверждающих сообщений
+    await state.update_data(show_confirmation=True)
     builder = ReplyKeyboardBuilder()
     for gender in ["Мужской", "Женский", "Предпочитаю не указывать"]:
         builder.add(types.KeyboardButton(text=gender))
@@ -854,8 +928,6 @@ async def handle_glagolitic_translation(message: types.Message, state: FSMContex
 
 @dp.message(FeedbackStates.gender, F.text.in_(["Мужской", "Женский", "Предпочитаю не указывать"]))
 async def process_gender(message: types.Message, state: FSMContext):
-    if await check_mat_and_respond(message, state):
-        return
     user_data = await state.get_data()
     feedback_id = user_data.get("feedback_id")
     
@@ -923,54 +995,56 @@ def get_age_group(text: str) -> tuple[str | None, str | None]:
 
 @dp.message(FeedbackStates.age_group)
 async def process_age_group(message: types.Message, state: FSMContext):
-    if await check_mat_and_respond(message, state):
-        return
+    # 1. Проверка на соответствие кнопкам
+    if message.text in ["до 18", "19-25", "26-40", "41-59", "Старше 60"]:
+        age_group = message.text
+    else:
+        # 2. Проверка на мат (для любого свободного ввода)
+        if await check_mat_and_respond(message, state):
+            return
+        
+        # 3. Попытка распознать возраст из текста
+        age_group, error_msg = get_age_group(message.text)
+        
+        if not age_group and not error_msg:
+            # 4. Проверка на оффтопик (если не кнопка, не цифра и не мат)
+            if await check_offtopic(message, state):
+                await timeout_manager.set(message.chat.id, state)
+                return
+            
+            # 5. Если ничего не распознано - просим выбрать из кнопок
+            builder = ReplyKeyboardBuilder()
+            for group in ["до 18", "19-25", "26-40", "41-59", "Старше 60"]:
+                builder.add(types.KeyboardButton(text=group))
+            builder.adjust(2)
+            
+            await message.answer(
+                "Не понял ваш ответ. Пожалуйста, выберите возрастную группу из кнопок ниже:",
+                reply_markup=builder.as_markup(resize_keyboard=True))
+            await timeout_manager.set(message.chat.id, state)
+            return
+        
+        if error_msg:
+            await message.answer(error_msg)
+            await timeout_manager.set(message.chat.id, state)
+            return
 
-    # Добавить проверку оффтопика перед основной логикой
-    if await check_offtopic(message, state):
-        await timeout_manager.set(message.chat.id, state)
-        return
-
+    # Сохраняем группу и переходим к следующему вопросу
     user_data = await state.get_data()
     feedback_id = user_data.get("feedback_id")
-
+    
     if not feedback_id:
         await message.answer("Ошибка сессии. Пожалуйста, начните заново (/start).")
         return
 
-    # Создаем клавиатуру (на случай, если ввод некорректный)
-    builder = ReplyKeyboardBuilder()
-    for group in ["до 18", "19-25", "26-40", "41-59", "Старше 60"]:
-        builder.add(types.KeyboardButton(text=group))
-    builder.adjust(2)
-
-    # Если пользователь выбрал кнопку
-    if message.text in ["до 18", "19-25", "26-40", "41-59", "Старше 60"]:
-        age_group = message.text
-    else:
-        # Пытаемся распознать возраст из текста ("мне 25" → "19-25")
-        age_group, error_msg = get_age_group(message.text)
-
-        if error_msg:  # Если ввели 0, 999 и т.д.
-            await message.answer(error_msg, reply_markup=builder.as_markup())
-            return
-
-        if not age_group:
-            await message.answer(
-                "Пожалуйста, выберите возрастную группу из кнопок ниже:",
-                reply_markup=builder.as_markup()
-            )
-            return
-
-    # Сохраняем группу и переходим к следующему вопросу
     success = await db_manager.update_feedback(feedback_id, "age_group", age_group)
     if not success:
         await message.answer("Ошибка сохранения. Попробуйте позже.")
         return
-
+    
     await message.answer(
         "Из какого вы города?",
-        reply_markup=types.ReplyKeyboardRemove()  # Убираем кнопки для следующего вопроса
+        reply_markup=types.ReplyKeyboardRemove()
     )
     await state.set_state(FeedbackStates.home_city)
     await timeout_manager.set(message.chat.id, state)
@@ -1082,6 +1156,11 @@ async def process_home_city(message: types.Message, state: FSMContext):
         logging.warning("[process_home_city] Обнаружен мат в сообщении")
         return
 
+    # Добавить проверку оффтопика перед основной логикой
+    if await check_offtopic(message, state):
+        await timeout_manager.set(message.chat.id, state)
+        return
+
     input_text = message.text
     city = extract_city_from_text(input_text)
     
@@ -1124,7 +1203,17 @@ async def process_home_city(message: types.Message, state: FSMContext):
         return
         
     logging.info("[process_home_city] Успешно сохранено, переходим к следующему вопросу")
-    
+
+    # Проверяем, нужно ли показывать подтверждающее сообщение
+    show_confirmation = user_data.get("show_confirmation", True)
+    if show_confirmation:
+        if city == "Владимир":
+            await message.answer(f"УХ ты! Мы с Вами земляки 😁")
+        else: 
+            await message.answer(f"{city}? Здорово! А я из Владимира")
+        await asyncio.sleep(1)
+        await state.update_data(show_confirmation=False)
+
     # Переход к следующему вопросу
     builder = ReplyKeyboardBuilder()
     for btn in ["Владимир", "Суздаль", "Гусь-Хрустальный", "с. Муромцево", "пос. Боголюбово", "Юрьев-Польский", "Другое"]:
@@ -1138,21 +1227,58 @@ async def process_home_city(message: types.Message, state: FSMContext):
     await state.set_state(FeedbackStates.visited_city)
     await timeout_manager.set(message.chat.id, state)
 
-@dp.message(FeedbackStates.visited_city, F.text.in_(["Владимир", "Суздаль", "Гусь-Хрустальный",
-                                                   "с. Муромцево", "пос. Боголюбово", "Юрьев-Польский", "Другое"]))
+@dp.message(FeedbackStates.visited_city)
 async def process_visited_city(message: types.Message, state: FSMContext):
     if await check_mat_and_respond(message, state):
         return
+    
     user_data = await state.get_data()
     feedback_id = user_data.get("feedback_id")
     
     if not feedback_id:
-        await message.answer("Ошибка сессии. Пожалуйста, начните опрос заново (/start).")
+        await message.answer("Ошибка сессии. Пожалуйста, начните заново (/start).")
         return
     
-    success = await db_manager.update_feedback(feedback_id, "visited_city", message.text)
+    # Обработка выбора из кнопок
+    if message.text in ["Владимир", "Суздаль", "Гусь-Хрустальный",
+                      "с. Муромцево", "пос. Боголюбово", "Юрьев-Польский", "Другое"]:
+        selected_cities = [message.text]
+    else:
+        # Для свободного ввода используем LLM с фильтрацией
+        selected_cities = await extract_visited_cities(message.text, message.bot)
+        
+        # Если после фильтрации осталось только "Другое" - заменяем на список с одним "Другое"
+        if selected_cities == ["Другое"]:
+            selected_cities = ["Другое"]
+        # Если в списке есть и города и "Другое" - оставляем только города
+        elif "Другое" in selected_cities:
+            selected_cities = [c for c in selected_cities if c != "Другое"]
+        
+        # Если города не найдены - проверяем оффтопик
+        if not selected_cities:
+            if await check_offtopic(message, state):
+                await timeout_manager.set(message.chat.id, state)
+                return
+            
+            # Если не оффтопик - просим выбрать из списка
+            builder = ReplyKeyboardBuilder()
+            for city in ["Владимир", "Суздаль", "Гусь-Хрустальный",
+                        "с. Муромцево", "пос. Боголюбово", "Юрьев-Польский"]:
+                builder.add(types.KeyboardButton(text=city))
+            builder.adjust(2)
+            builder.add(types.KeyboardButton(text="Другое"))
+            
+            await message.answer(
+                "Пожалуйста, выберите город из предложенных:",
+                reply_markup=builder.as_markup(resize_keyboard=True))
+            await timeout_manager.set(message.chat.id, state)
+            return
+    
+    # Сохраняем города через запятую
+    cities_str = ",".join(selected_cities)
+    success = await db_manager.update_feedback(feedback_id, "visited_city", cities_str)
     if not success:
-        await message.answer("Произошла ошибка при сохранении данных. Пожалуйста, попробуйте позже.")
+        await message.answer("Ошибка сохранения. Попробуйте позже.")
         return
     
     await message.answer(
@@ -1162,26 +1288,6 @@ async def process_visited_city(message: types.Message, state: FSMContext):
     await state.set_state(FeedbackStates.visited_events)
     await timeout_manager.set(message.chat.id, state)
 
-@dp.message(FeedbackStates.visited_city)
-async def wrong_visited_city(message: types.Message, state: FSMContext):
-    if await check_mat_and_respond(message, state):
-        return
-    if await check_offtopic(message, state):
-        await timeout_manager.set(message.chat.id, state)
-        return
-    builder = ReplyKeyboardBuilder()
-    cities = ["Владимир", "Суздаль", "Гусь-Хрустальный",
-             "с. Муромцево", "пос. Боголюбово", "Юрьев-Польский"]
-    for city in cities:
-        builder.add(types.KeyboardButton(text=city))
-    builder.adjust(2)
-    builder.add(types.KeyboardButton(text="Другое"))
-    
-    await message.answer(
-        "Пожалуйста, выберите город из списка:",
-        reply_markup=builder.as_markup(resize_keyboard=True)
-    )
-    await timeout_manager.set(message.chat.id, state)
 
 @dp.message(FeedbackStates.visited_events)
 async def process_visited_events(message: types.Message, state: FSMContext):
@@ -1208,7 +1314,15 @@ async def process_visited_events(message: types.Message, state: FSMContext):
     if not success:
         await message.answer("Произошла ошибка при сохранении данных. Пожалуйста, попробуйте позже.")
         return
+
+    # Подтверждающее сообщение
+    show_confirmation = user_data.get("show_confirmation", True)
+    if show_confirmation:
+        await message.answer("Спасибо! Осталось всего два вопроса 🤏")
+        await asyncio.sleep(1)
+        await state.update_data(show_confirmation=False)
     
+    await state.update_data(show_confirmation=True)
     await message.answer("Что вам понравилось больше всего?")
     await state.set_state(FeedbackStates.liked)
     await timeout_manager.set(message.chat.id, state)
@@ -1238,6 +1352,13 @@ async def process_liked(message: types.Message, state: FSMContext):
     if not success:
         await message.answer("Произошла ошибка при сохранении данных. Пожалуйста, попробуйте позже.")
         return
+
+    # Подтверждающее сообщение
+    show_confirmation = user_data.get("show_confirmation", True)
+    if show_confirmation:
+        await message.answer("Ага, записал ✍️")
+        await asyncio.sleep(1)
+        await state.update_data(show_confirmation=False)
     
     await message.answer("Что вам не понравилось или что можно улучшить?")
     await state.set_state(FeedbackStates.disliked)
