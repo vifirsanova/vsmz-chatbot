@@ -146,9 +146,9 @@ def load_bad_words(filename: str = "bad_words.txt") -> set:
 # Загружаем словарь при старте
 MAT_WORDS = load_bad_words()
 MAT_RESPONSES = [
-    "Пожалуйста, будьте вежливы. Давайте общаться культурно.",
-    "У нас принято выражаться вежливо. Давайте без грубостей.",
-    "Такие выражения недопустимы. Пожалуйста, следите за речью."
+    "Будем вежливы друг к другу — так приятнее общаться!",
+    "Интересная манера выражаться… Однако давайте переформулируем её в более приемлемом ключе"
+    "Уверен, вы сможете выразить свою мысль не менее ярко, но в более достойной форме"
 ]
 
 def load_city_dictionary(filename: str = "output_names.json") -> Set[str]:
@@ -289,19 +289,19 @@ class DatabaseManager:
                 return "Продолжим опрос:"
             
             if feedback.gender is None:
-                return "Укажите ваш пол:"
+                return "Пожалуйста, укажите ваш пол:"
             elif feedback.age_group is None:
-                return "Укажите вашу возрастную группу:"
+                return "Подскажите, пожалуйста, сколько вам лет?"
             elif feedback.home_city is None:
-                return "Из какого вы города?"
+                return "Из какого вы города вы приехали?"
             elif feedback.visited_city is None:
-                return "Какой город вы посетили?"
+                return "Подскажите, какой город вы посетили?"
             elif feedback.visited_events is None:
-                return "Что именно вы посетили? (экспозицию/выставку/экскурсию/мероприятие)"
+                return "Вы были на экспозиции, выставке, экскурсии или каком-то мероприятии?"
             elif feedback.liked is None:
                 return "Что вам понравилось больше всего?"
             elif feedback.disliked is None:
-                return "Что вам не понравилось или что можно улучшить?"
+                return "Скажите, а что вам не понравилось, или что можно улучшить?"
             else:
                 return "Продолжим опрос:"
     
@@ -485,7 +485,7 @@ async def check_mat_and_respond(message: types.Message, state: FSMContext) -> bo
         
         if mat_count >= 3:
             await message.answer(
-                "К сожалению, мы вынуждены прекратить общение. Всего доброго!",
+                "На этом, пожалуй, и остановимся. Хорошего вам дня!",
                 reply_markup=types.ReplyKeyboardRemove()
             )
             await state.clear()
@@ -498,7 +498,7 @@ async def check_mat_and_respond(message: types.Message, state: FSMContext) -> bo
         # В зависимости от состояния отправляем соответствующее приглашение
         if current_state == FeedbackStates.initial.state:
             builder = ReplyKeyboardBuilder()
-            builder.add(types.KeyboardButton(text="Начать опрос"))
+            builder.add(types.KeyboardButton(text="Оставить отзыв"))
             builder.add(types.KeyboardButton(text="Перевод на глаголицу"))
             await message.answer(
                 "Пожалуйста, выберите действие:",
@@ -506,7 +506,7 @@ async def check_mat_and_respond(message: types.Message, state: FSMContext) -> bo
             )
         elif current_state == TranslationState.waiting_for_text.state:
             await message.answer(
-                "Введите текст на кириллице для перевода в глаголицу:",
+                "Пожалуйста, напишите текст на кириллице для перевода в глаголицу:",
                 reply_markup=types.ReplyKeyboardRemove()
             )
         return True
@@ -522,7 +522,7 @@ async def check_mat_and_respond(message: types.Message, state: FSMContext) -> bo
     if mat_count >= 3:
         await db_manager.update_feedback(feedback_id, "status", "abandoned")
         await message.answer(
-            "К сожалению, мы вынуждены прекратить общение. Всего доброго!",
+            "На этом, пожалуй, и остановимся. Хорошего вам дня!",
             reply_markup=types.ReplyKeyboardRemove()
         )
         await state.clear()
@@ -544,7 +544,7 @@ async def check_mat_and_respond(message: types.Message, state: FSMContext) -> bo
                 builder.add(types.KeyboardButton(text=gender))
             builder.adjust(2)
             await message.answer(
-                f"Вернемся к вопросу:\n{current_question}",
+                f"Позвольте вернуться к предыдущему вопросу:\n{current_question}",
                 reply_markup=builder.as_markup(resize_keyboard=True)
             )
         
@@ -557,11 +557,11 @@ async def check_mat_and_respond(message: types.Message, state: FSMContext) -> bo
             builder.adjust(2)
             builder.add(types.KeyboardButton(text="Другое"))
             await message.answer(
-                f"Вернемся к вопросу:\n{current_question}",
+                f"Позвольте вернуться к предыдущему вопросу:\n{current_question}",
                 reply_markup=builder.as_markup(resize_keyboard=True))
         
         else:
-            await message.answer(f"Вернемся к вопросу:\n{current_question}")
+            await message.answer(f"Позвольте вернуться к предыдущему вопросу:\n{current_question}")
         
         return True
     except Exception as e:
@@ -623,7 +623,7 @@ async def detect_offtopic(text: str, bot_instance: Bot) -> Optional[dict]:
                         Заготовленный ответ: {OFFTOPIC_THEMES[theme]['response']}
                         
                         Сгенерируй развернутый и дружелюбный ответ на тему \"{OFFTOPIC_THEMES[theme]['description']}\", используя заготовленный ответ как основу. 
-                        Ответ не должен содержать вопросы. Ответ должен быть естественным и не слишком формальным. Ответ не должен содержать приветствия. Не предлагай помощь.
+                        Ответ не должен содержать вопросы. Ответ должен быть естественным, интеллигентным и не слишком формальным. Ответ не должен содержать приветствия. Не предлагай помощь.
 
                         """
                         
@@ -656,7 +656,7 @@ async def detect_offtopic(text: str, bot_instance: Bot) -> Optional[dict]:
                                 Заготовленный ответ: {OFFTOPIC_THEMES[theme]['response']}
                                 
                                 Сгенерируй развернутый и дружелюбный ответ на тему \"{OFFTOPIC_THEMES[theme]['description']}\", используя заготовленный ответ как основу. 
-                                Ответ не должен содержать вопросы. Ответ должен быть естественным и не слишком формальным. Ответ не должен содержать приветствия. Не предлагай помощь.
+                                Ответ не должен содержать вопросы. Ответ должен быть естественным, интеллигентным и не слишком формальным. Ответ не должен содержать приветствия. Не предлагай помощь.
                                 """
                                 
                                 thread_generate = bot_instance.sdk.threads.create()
@@ -713,7 +713,7 @@ async def check_offtopic(message: types.Message, state: FSMContext) -> bool:
     if current_state == FeedbackStates.initial.state:
         # В начальном состоянии показываем меню
         builder = ReplyKeyboardBuilder()
-        builder.add(types.KeyboardButton(text="Начать опрос"))
+        builder.add(types.KeyboardButton(text="Оставить отзыв"))
         builder.add(types.KeyboardButton(text="Перевод на глаголицу"))
         await message.answer(
             "Пожалуйста, выберите действие:",
@@ -724,7 +724,7 @@ async def check_offtopic(message: types.Message, state: FSMContext) -> bool:
         feedback_id = user_data.get("feedback_id")
         if feedback_id:
             current_question = await db_manager.get_current_question(feedback_id)
-            await message.answer(f"Вернемся к вопросу:\n{current_question}")
+            await message.answer(f"Если позволите, вернемся к вопросу:\n{current_question}")
     
     await timeout_manager.set(message.chat.id, state)
     return True
@@ -818,11 +818,13 @@ async def start_feedback(message: types.Message, state: FSMContext):
         # Убираем проверку оффтопика здесь - она теперь в handle_initial_state
         
         builder = ReplyKeyboardBuilder()
-        builder.add(types.KeyboardButton(text="Начать опрос"))
+        builder.add(types.KeyboardButton(text="Оставить отзыв"))
         builder.add(types.KeyboardButton(text="Перевод на глаголицу"))
 
         await message.answer(
-            "Здравствуйте! Спасибо за посещение музея. Выберите действие:",
+            "Благодарю, что заглянули ко мне 😊\n"
+            "Я Митя, гид-исследователь Владимиро-Суздальского музея-заповедника. Буду рад узнать, как прошел ваш визит, или могу помочь с переводом текста на глаголицу.\n"
+            "Пожалуйста, выберите действие: ",
             reply_markup=builder.as_markup(resize_keyboard=True)
         )
         await state.set_state(FeedbackStates.initial)
@@ -830,9 +832,9 @@ async def start_feedback(message: types.Message, state: FSMContext):
         
     except Exception as e:
         logging.error(f"Ошибка при старте опроса: {e}")
-        await message.answer("Произошла ошибка. Пожалуйста, попробуйте позже.")
+        await message.answer("К сожалению, произошла техническая ошибка. Пожалуйста, попробуйте написать мне попозже")
 
-@dp.message(F.text == "Начать опрос", FeedbackStates.initial)
+@dp.message(F.text == "Оставить отзыв", FeedbackStates.initial)
 async def start_survey(message: types.Message, state: FSMContext):
     if await check_mat_and_respond(message, state):
         return
@@ -844,7 +846,8 @@ async def start_survey(message: types.Message, state: FSMContext):
     builder.adjust(2)
 
     await message.answer(
-        "Укажите ваш пол:",
+        "Отлично, спасибо! Итак, я задам всего 7 вопросов.\n"
+        "1️⃣ Пожалуйста, укажите ваш пол:",
         reply_markup=builder.as_markup(resize_keyboard=True)
     )
     await state.set_state(FeedbackStates.gender)
@@ -856,7 +859,7 @@ async def start_glagolitic_translation(message: types.Message, state: FSMContext
         return
     await state.set_state(TranslationState.waiting_for_text)
     await message.answer(
-        "Введите текст на кириллице для перевода в глаголицу:",
+        "Чтобы я мог сделать перевод, пожалуйста, введите текст на кириллице:",
         reply_markup=types.ReplyKeyboardRemove()
     )
     await timeout_manager.set(message.chat.id, state)
@@ -868,7 +871,7 @@ async def handle_initial_state(message: types.Message, state: FSMContext):
         return
     
     # 2. Игнорируем кнопки - они уже обработаны выше
-    if message.text in ["Начать опрос", "Перевод на глаголицу"]:
+    if message.text in ["Оставить отзыв", "Перевод на глаголицу"]:
         return
     
     # 3. Проверка оффтопика
@@ -878,7 +881,7 @@ async def handle_initial_state(message: types.Message, state: FSMContext):
          
     # 4. Ответ для нераспознанных сообщений
     builder = ReplyKeyboardBuilder()
-    builder.add(types.KeyboardButton(text="Начать опрос"))
+    builder.add(types.KeyboardButton(text="Оставить отзыв"))
     builder.add(types.KeyboardButton(text="Перевод на глаголицу"))
     
     await message.answer(
@@ -892,7 +895,7 @@ async def translate_more(message: types.Message, state: FSMContext):
         return
     await state.set_state(TranslationState.waiting_for_text)
     await message.answer(
-        "Введите текст на кириллице для перевода в глаголицу:",
+        "Введите текст:",
         reply_markup=types.ReplyKeyboardRemove()
     )
     await timeout_manager.set(message.chat.id, state)
@@ -935,7 +938,7 @@ async def handle_glagolitic_translation(message: types.Message, state: FSMContex
             reply_markup=builder.as_markup(resize_keyboard=True)
         )
     else:
-        await message.answer("Пожалуйста, введите текст, содержащий кириллические символы.")
+        await message.answer("Увы, такое перевести у меня не получится. Пожалуйста, напишите текст, содержащий кириллические символы")
     
     await timeout_manager.set(message.chat.id, state)
 
@@ -945,12 +948,12 @@ async def process_gender(message: types.Message, state: FSMContext):
     feedback_id = user_data.get("feedback_id")
     
     if not feedback_id:
-        await message.answer("Ошибка сессии. Пожалуйста, начните опрос заново (/start).")
+        await message.answer("К сожалению, возникла техническая ошибка. Пожалуйста, попробуйте начать опрос заново (/start)")
         return
     
     success = await db_manager.update_feedback(feedback_id, "gender", message.text)
     if not success:
-        await message.answer("Произошла ошибка при сохранении данных. Пожалуйста, попробуйте позже.")
+        await message.answer("К сожалению, возникла техническая ошибка при сохранении данных. Пожалуйста, попробуйте написать мне позже")
         return
     
     # Создаем клавиатуру с возрастными группами
@@ -960,7 +963,7 @@ async def process_gender(message: types.Message, state: FSMContext):
     builder.adjust(2)  # Группируем кнопки по 2 в ряд
 
     await message.answer(
-        "Укажите вашу возрастную группу:",  # Уточняем, что нужна группа, а не точный возраст
+        "2️⃣ Подскажите, пожалуйста, сколько вам лет?", 
         reply_markup=builder.as_markup(resize_keyboard=True)  # Показываем кнопки
     )
     await state.set_state(FeedbackStates.age_group)  # Переходим в age_group, а не age
@@ -975,7 +978,7 @@ async def wrong_gender(message: types.Message, state: FSMContext):
         await timeout_manager.set(message.chat.id, state)
         return
 
-    await message.answer("Пожалуйста, выберите вариант из кнопок ниже")
+    await message.answer("К сожалению, не совсем смог разобрать. Выберите, пожалуйста, вариант из кнопок ниже")
     await timeout_manager.set(message.chat.id, state)
 
 def get_age_group(text: str) -> tuple[str | None, str | None]:
@@ -991,9 +994,9 @@ def get_age_group(text: str) -> tuple[str | None, str | None]:
         return None, None
     
     if age <= 0:
-        return None, "Пожалуйста, укажите свой настоящий возраст"
+        return None, "Будьте добры, укажите свой настоящий возраст 😬"
     elif age > 120:
-        return None, "Пожалуйста, укажите свой настоящий возраст"
+        return None, "Будьте добры, укажите свой настоящий возраст 😬"
     
     if age <= 18:
         return "до 18", None
@@ -1032,7 +1035,7 @@ async def process_age_group(message: types.Message, state: FSMContext):
             builder.adjust(2)
             
             await message.answer(
-                "Не понял ваш ответ. Пожалуйста, выберите возрастную группу из кнопок ниже:",
+                "Простите, не смог разобрать ваш ответ. Пожалуйста, укажите возраст цифрами или выберите подходящий вариант из кнопок ниже:",
                 reply_markup=builder.as_markup(resize_keyboard=True))
             await timeout_manager.set(message.chat.id, state)
             return
@@ -1047,16 +1050,16 @@ async def process_age_group(message: types.Message, state: FSMContext):
     feedback_id = user_data.get("feedback_id")
     
     if not feedback_id:
-        await message.answer("Ошибка сессии. Пожалуйста, начните заново (/start).")
+        await message.answer("К сожалению, возникла техническая ошибка. Пожалуйста, попробуйте начать опрос заново (/start)")
         return
 
     success = await db_manager.update_feedback(feedback_id, "age_group", age_group)
     if not success:
-        await message.answer("Ошибка сохранения. Попробуйте позже.")
+        await message.answer("К сожалению, возникла техническая ошибка при сохранении данных. Пожалуйста, попробуйте написать мне позже")
         return
     
     await message.answer(
-        "Из какого вы города?",
+        "3️⃣ Из какого города вы приехали?",
         reply_markup=types.ReplyKeyboardRemove()
     )
     await state.set_state(FeedbackStates.home_city)
@@ -1188,7 +1191,7 @@ async def process_home_city(message: types.Message, state: FSMContext):
         
         if normalized_city not in WORLD_CITIES:
             logging.error(f"[process_home_city] Город не найден в словаре: '{city}' (нормализованный: '{normalized_city}')")
-            await message.answer("Указанный город не найден в списке. Пожалуйста, укажите другой.")
+            await message.answer("Простите, не смог распознать ваш город. Попробуйте, пожалуйста, написать полное название или подскажите другой ближайший к вам город")
             return
 
         # Сохраняем в БД (уже с правильным регистром)
@@ -1214,7 +1217,7 @@ async def process_home_city(message: types.Message, state: FSMContext):
         show_confirmation = user_data.get("show_confirmation", True)
         if show_confirmation:
             if city == "Владимир":
-                await message.answer(f"Ух ты! Мы с Вами земляки 😁")
+                await message.answer(f"Ух ты! Мы с вами земляки 😁")
             else: 
                 await message.answer(f"{city}? Здорово! А я из Владимира")
             await asyncio.sleep(1)
@@ -1227,7 +1230,7 @@ async def process_home_city(message: types.Message, state: FSMContext):
         builder.adjust(2)
         
         await message.answer(
-            "Какой город вы посетили?",
+            "4️⃣ Скажите, а какой город вы посетили?",
             reply_markup=builder.as_markup(resize_keyboard=True)
         )
         await state.set_state(FeedbackStates.visited_city)
@@ -1241,7 +1244,7 @@ async def process_home_city(message: types.Message, state: FSMContext):
     
     # 5. Если не мат, не город и не оффтопик - обработка как нераспознанный запрос
     logging.warning("[process_home_city] Город не распознан и не оффтопик")
-    await message.answer("Не удалось распознать город. Пожалуйста, укажите в формате: «Москва», «Санкт-Петербург»")
+    await message.answer("Простите, не смог распознать ваш город. Попробуйте, пожалуйста, написать полное название или подскажите другой ближайший к вам город")
     await timeout_manager.set(message.chat.id, state)
 
 @dp.message(FeedbackStates.visited_city)
@@ -1253,7 +1256,7 @@ async def process_visited_city(message: types.Message, state: FSMContext):
     feedback_id = user_data.get("feedback_id")
     
     if not feedback_id:
-        await message.answer("Ошибка сессии. Пожалуйста, начните заново (/start).")
+        await message.answer("К сожалению, возникла техническая ошибка. Пожалуйста, попробуйте начать опрос заново (/start)")
         return
     
     # Обработка выбора из кнопок
@@ -1286,7 +1289,7 @@ async def process_visited_city(message: types.Message, state: FSMContext):
             builder.add(types.KeyboardButton(text="Другое"))
             
             await message.answer(
-                "Пожалуйста, выберите город из предложенных:",
+                "Пожалуйста, выберите один из перечисленных вариантов:",
                 reply_markup=builder.as_markup(resize_keyboard=True))
             await timeout_manager.set(message.chat.id, state)
             return
@@ -1299,7 +1302,7 @@ async def process_visited_city(message: types.Message, state: FSMContext):
         return
     
     await message.answer(
-        "Что именно вы посетили? (экспозицию/выставку/экскурсию/мероприятие)",
+        "5️⃣ Что вам удалось посетить? Может быть, экспозицию, выставку, экскурсию или другое событие?",
         reply_markup=types.ReplyKeyboardRemove()
     )
     await state.set_state(FeedbackStates.visited_events)
@@ -1319,17 +1322,17 @@ async def process_visited_events(message: types.Message, state: FSMContext):
     feedback_id = user_data.get("feedback_id")
     
     if not feedback_id:
-        await message.answer("Ошибка сессии. Пожалуйста, начните опрос заново (/start).")
+        await message.answer("К сожалению, возникла техническая ошибка. Пожалуйста, попробуйте начать опрос заново (/start)")
         return
     
     if len(message.text) < 5:
-        await message.answer("Пожалуйста, напишите более подробно")
+        await message.answer("Расскажите, пожалуйста, чуть поподробнее об этом")
         await timeout_manager.set(message.chat.id, state)
         return
 
     success = await db_manager.update_feedback(feedback_id, "visited_events", message.text)
     if not success:
-        await message.answer("Произошла ошибка при сохранении данных. Пожалуйста, попробуйте позже.")
+        await message.answer("К сожалению, возникла техническая ошибка при сохранении данных. Пожалуйста, попробуйте написать мне позже")
         return
 
     # Подтверждающее сообщение
@@ -1340,7 +1343,7 @@ async def process_visited_events(message: types.Message, state: FSMContext):
         await state.update_data(show_confirmation=False)
     
     await state.update_data(show_confirmation=True)
-    await message.answer("Что вам понравилось больше всего?")
+    await message.answer("6️⃣ Что в нашем музее вам понравилось больше всего?")
     await state.set_state(FeedbackStates.liked)
     await timeout_manager.set(message.chat.id, state)
 
@@ -1357,17 +1360,17 @@ async def process_liked(message: types.Message, state: FSMContext):
     feedback_id = user_data.get("feedback_id")
     
     if not feedback_id:
-        await message.answer("Ошибка сессии. Пожалуйста, начните опрос заново (/start).")
+        await message.answer("К сожалению, возникла техническая ошибка. Пожалуйста, попробуйте начать опрос заново (/start)")
         return
     
     if len(message.text) < 5:
-        await message.answer("Пожалуйста, напишите более развернуто")
+        await message.answer("Расскажите, пожалуйста, чуть поподробнее об этом")
         await timeout_manager.set(message.chat.id, state)
         return
 
     success = await db_manager.update_feedback(feedback_id, "liked", message.text)
     if not success:
-        await message.answer("Произошла ошибка при сохранении данных. Пожалуйста, попробуйте позже.")
+        await message.answer("К сожалению, возникла техническая ошибка при сохранении данных. Пожалуйста, попробуйте написать мне позже")
         return
 
     # Подтверждающее сообщение
@@ -1377,7 +1380,7 @@ async def process_liked(message: types.Message, state: FSMContext):
         await asyncio.sleep(1)
         await state.update_data(show_confirmation=False)
     
-    await message.answer("Что вам не понравилось или что можно улучшить?")
+    await message.answer("И последний вопрос...\n 7️⃣ Подскажите, а что вам не понравилось, или что можно улучшить?")
     await state.set_state(FeedbackStates.disliked)
     await timeout_manager.set(message.chat.id, state)
 
@@ -1394,12 +1397,12 @@ async def process_disliked(message: types.Message, state: FSMContext):
     feedback_id = user_data.get("feedback_id")
     
     if not feedback_id:
-        await message.answer("Ошибка сессии. Пожалуйста, начните опрос заново (/start).")
+        await message.answer("К сожалению, возникла техническая ошибка. Пожалуйста, попробуйте начать опрос заново (/start)")
         return
     
     success = await db_manager.update_feedback(feedback_id, "disliked", message.text)
     if not success:
-        await message.answer("Произошла ошибка при сохранении данных. Пожалуйста, попробуйте позже.")
+        await message.answer("К сожалению, возникла техническая ошибка при сохранении данных. Пожалуйста, попробуйте написать мне позже")
         return
     
     # Помечаем опрос как завершенный
@@ -1409,7 +1412,7 @@ async def process_disliked(message: types.Message, state: FSMContext):
     await db_manager.export_to_csv()
     
     await message.answer(
-        "Спасибо за обратную связь! Мы учтем ваши замечания.",
+        "Большое спасибо за ваш отзыв! Обязательно передам его своим коллегам, чтобы мы могли стать лучше.\nВсего вам доброго, ждём снова в гости 🤍",
         reply_markup=types.ReplyKeyboardRemove()
     )
     await state.clear()
