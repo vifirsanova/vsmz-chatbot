@@ -73,7 +73,7 @@ OFFTOPIC_THEMES = {
         "description": "В эту тематику входят ТОЛЬКО явные вопросы о музее, когда пользователь просит рассказать о музее, его истории, экспонатах, работе, билетах, экскурсиях. В эту тематику НЕ ВХОДЯТ ответы о посещении и что понравилось",
         "response": "Владимиро-Суздальский музей-заповедник - это крупный музейный комплекс, "
                    "включающий памятники архитектуры XII-XIII веков. Подробнее можно узнать на сайте: "
-                   "https://vladmuseum.ru/ru/"
+                   "https://vladmuseum.ru/ru/. Всю информацию можно найти там."
     },
     "favorite_food": {
         "description": "Какая у тебя любимая еда?",
@@ -147,7 +147,7 @@ def load_bad_words(filename: str = "bad_words.txt") -> set:
 MAT_WORDS = load_bad_words()
 MAT_RESPONSES = [
     "Будем вежливы друг к другу — так приятнее общаться!",
-    "Интересная манера выражаться… Однако давайте переформулируем её в более приемлемом ключе"
+    "Интересная манера выражаться… Однако давайте переформулируем её в более приемлемом ключе",
     "Уверен, вы сможете выразить свою мысль не менее ярко, но в более достойной форме"
 ]
 
@@ -519,7 +519,7 @@ async def check_mat_and_respond(message: types.Message, state: FSMContext) -> bo
     mat_count = user_data.get("mat_count", 0) + 1
     await state.update_data(mat_count=mat_count)
     
-    if mat_count >= 3:
+    if mat_count >= 4:
         await db_manager.update_feedback(feedback_id, "status", "abandoned")
         await message.answer(
             "На этом, пожалуй, и остановимся. Хорошего вам дня!",
@@ -1305,6 +1305,7 @@ async def process_visited_city(message: types.Message, state: FSMContext):
         "5️⃣ Что вам удалось посетить? Может быть, экспозицию, выставку, экскурсию или другое событие?",
         reply_markup=types.ReplyKeyboardRemove()
     )
+    await state.update_data(show_confirmation=True)
     await state.set_state(FeedbackStates.visited_events)
     await timeout_manager.set(message.chat.id, state)
 
