@@ -70,7 +70,7 @@ OFFTOPIC_THEMES = {
                    "особенно наличники."
     },
     "about_museum": {
-        "description": "Расскажи о музее",
+        "description": "В эту тематику входят ТОЛЬКО явные вопросы о музее, когда пользователь просит рассказать о музее, его истории, экспонатах, работе, билетах, экскурсиях. В эту тематику НЕ ВХОДЯТ ответы о посещении и что понравилось",
         "response": "Владимиро-Суздальский музей-заповедник - это крупный музейный комплекс, "
                    "включающий памятники архитектуры XII-XIII веков. Подробнее можно узнать на сайте: "
                    "https://vladmuseum.ru/ru/"
@@ -580,14 +580,16 @@ async def detect_offtopic(text: str, bot_instance: Bot) -> Optional[dict]:
         
         # Определяем тему оффтопика
         prompt_detect = f"""
-        Определи, относится ли следующий текст к одному из оффтопных вопросов: {json.dumps({k: v['description'] for k, v in OFFTOPIC_THEMES.items()}, indent=2, ensure_ascii=False)}
+        Определи, относится ли ответ пользователя в диалоге с ботом к одному из оффтопных вопросов: {json.dumps({k: v['description'] for k, v in OFFTOPIC_THEMES.items()}, indent=2, ensure_ascii=False)}
+
+        Если пользователь говорит о музее в контексте обратной связи (что посетил, что понравилось, что не понравилось) - это не оффтопик, верни false.
         
         Формат ответа: JSON с полями is_offtopic (bool) и theme (string, optional)
         Примеры:
         - Оффтопик: {{\"is_offtopic\": true, \"theme\": \"who_are_you\"}}
         - Не оффтопик: {{\"is_offtopic\": false}}
         
-        Текст для анализа: \"{text}\"
+        Диалог для анализа: \"{text}\"
         """
         
         try:
@@ -621,7 +623,8 @@ async def detect_offtopic(text: str, bot_instance: Bot) -> Optional[dict]:
                         Заготовленный ответ: {OFFTOPIC_THEMES[theme]['response']}
                         
                         Сгенерируй развернутый и дружелюбный ответ на тему \"{OFFTOPIC_THEMES[theme]['description']}\", используя заготовленный ответ как основу. 
-                        Ответ должен быть естественным и не слишком формальным.
+                        Ответ не должен содержать вопросы. Ответ должен быть естественным и не слишком формальным. Ответ не должен содержать приветствия. Не предлагай помощь.
+
                         """
                         
                         thread_generate = bot_instance.sdk.threads.create()
@@ -653,7 +656,7 @@ async def detect_offtopic(text: str, bot_instance: Bot) -> Optional[dict]:
                                 Заготовленный ответ: {OFFTOPIC_THEMES[theme]['response']}
                                 
                                 Сгенерируй развернутый и дружелюбный ответ на тему \"{OFFTOPIC_THEMES[theme]['description']}\", используя заготовленный ответ как основу. 
-                                Ответ должен быть естественным и не слишком формальным.
+                                Ответ не должен содержать вопросы. Ответ должен быть естественным и не слишком формальным. Ответ не должен содержать приветствия. Не предлагай помощь.
                                 """
                                 
                                 thread_generate = bot_instance.sdk.threads.create()
@@ -687,7 +690,19 @@ async def detect_offtopic(text: str, bot_instance: Bot) -> Optional[dict]:
 
 async def check_offtopic(message: types.Message, state: FSMContext) -> bool:
     """Проверяет, является ли сообщение оффтопным, и отправляет сгенерированный ответ."""
-    offtopic_data = await detect_offtopic(message.text, message.bot)
+    current_state = await state.get_state()
+    add_question = ""
+
+    if current_state == FeedbackStates.visited_events: 
+        add_question = "Бот спросил: Что вы посетили? Пользователь ответил: "
+    if current_state == FeedbackStates.liked: 
+        add_question = "Бот спросил: Что вам понравилось? Пользователь ответил: "
+    if current_state == FeedbackStates.disliked: 
+        add_question = "Бот спросил: Что вам не понравилось? Пользователь ответил: "
+
+
+    offtopic_data = await detect_offtopic(add_question + message.text, message.bot)
+
     if not offtopic_data:
         return False
     
@@ -695,8 +710,6 @@ async def check_offtopic(message: types.Message, state: FSMContext) -> bool:
     await message.answer(offtopic_data["response"])
     
     # Возвращаем пользователя к предыдущему вопросу или меню
-    current_state = await state.get_state()
-    
     if current_state == FeedbackStates.initial.state:
         # В начальном состоянии показываем меню
         builder = ReplyKeyboardBuilder()
@@ -1152,15 +1165,12 @@ def extract_city_from_text(text: str) -> Optional[str]:
 async def process_home_city(message: types.Message, state: FSMContext):
     logging.info(f"\n[process_home_city] Начало обработки сообщения: '{message.text}'")
     
+    # 1. Проверка на мат (первым делом)
     if await check_mat_and_respond(message, state):
         logging.warning("[process_home_city] Обнаружен мат в сообщении")
         return
 
-    # Добавить проверку оффтопика перед основной логикой
-    if await check_offtopic(message, state):
-        await timeout_manager.set(message.chat.id, state)
-        return
-
+    # 2. Попытка распознать город
     input_text = message.text
     city = extract_city_from_text(input_text)
     
@@ -1170,61 +1180,68 @@ async def process_home_city(message: types.Message, state: FSMContext):
     
     logging.info(f"[process_home_city] Извлеченный город (после капитализации): '{city}'")
     
-    if not city:
-        logging.warning("[process_home_city] Город не распознан")
-        await message.answer("Не удалось распознать город. Пожалуйста, укажите в формате: «Москва», «Санкт-Петербург»")
+    # 3. Если город распознан - обработка
+    if city:
+        # Дополнительная проверка перед сохранением
+        normalized_city = normalize_word(city.lower().replace(' ', '-'))
+        logging.info(f"[process_home_city] Нормализованная форма города: '{normalized_city}'")
+        
+        if normalized_city not in WORLD_CITIES:
+            logging.error(f"[process_home_city] Город не найден в словаре: '{city}' (нормализованный: '{normalized_city}')")
+            await message.answer("Указанный город не найден в списке. Пожалуйста, укажите другой.")
+            return
+
+        # Сохраняем в БД (уже с правильным регистром)
+        user_data = await state.get_data()
+        feedback_id = user_data.get("feedback_id")
+        
+        if not feedback_id:
+            logging.error("[process_home_city] Не найден feedback_id")
+            await message.answer("Ошибка сессии. Начните заново (/start).")
+            return
+
+        logging.info(f"[process_home_city] Сохраняем город '{city}' для feedback_id {feedback_id}")
+        success = await db_manager.update_feedback(feedback_id, "home_city", city)
+        
+        if not success:
+            logging.error("[process_home_city] Ошибка сохранения в БД")
+            await message.answer("Ошибка сохранения. Попробуйте позже.")
+            return
+            
+        logging.info("[process_home_city] Успешно сохранено, переходим к следующему вопросу")
+
+        # Проверяем, нужно ли показывать подтверждающее сообщение
+        show_confirmation = user_data.get("show_confirmation", True)
+        if show_confirmation:
+            if city == "Владимир":
+                await message.answer(f"Ух ты! Мы с Вами земляки 😁")
+            else: 
+                await message.answer(f"{city}? Здорово! А я из Владимира")
+            await asyncio.sleep(1)
+            await state.update_data(show_confirmation=False)
+
+        # Переход к следующему вопросу
+        builder = ReplyKeyboardBuilder()
+        for btn in ["Владимир", "Суздаль", "Гусь-Хрустальный", "с. Муромцево", "пос. Боголюбово", "Юрьев-Польский", "Другое"]:
+            builder.add(types.KeyboardButton(text=btn))
+        builder.adjust(2)
+        
+        await message.answer(
+            "Какой город вы посетили?",
+            reply_markup=builder.as_markup(resize_keyboard=True)
+        )
+        await state.set_state(FeedbackStates.visited_city)
         await timeout_manager.set(message.chat.id, state)
         return
-
-    # Дополнительная проверка перед сохранением
-    normalized_city = normalize_word(city.lower().replace(' ', '-'))
-    logging.info(f"[process_home_city] Нормализованная форма города: '{normalized_city}'")
     
-    if normalized_city not in WORLD_CITIES:
-        logging.error(f"[process_home_city] Город не найден в словаре: '{city}' (нормализованный: '{normalized_city}')")
-        await message.answer("Указанный город не найден в списке. Пожалуйста, укажите другой.")
+    # 4. Если город не распознан - проверка на оффтопик
+    if await check_offtopic(message, state):
+        await timeout_manager.set(message.chat.id, state)
         return
-
-    # Сохраняем в БД (уже с правильным регистром)
-    user_data = await state.get_data()
-    feedback_id = user_data.get("feedback_id")
     
-    if not feedback_id:
-        logging.error("[process_home_city] Не найден feedback_id")
-        await message.answer("Ошибка сессии. Начните заново (/start).")
-        return
-
-    logging.info(f"[process_home_city] Сохраняем город '{city}' для feedback_id {feedback_id}")
-    success = await db_manager.update_feedback(feedback_id, "home_city", city)
-    
-    if not success:
-        logging.error("[process_home_city] Ошибка сохранения в БД")
-        await message.answer("Ошибка сохранения. Попробуйте позже.")
-        return
-        
-    logging.info("[process_home_city] Успешно сохранено, переходим к следующему вопросу")
-
-    # Проверяем, нужно ли показывать подтверждающее сообщение
-    show_confirmation = user_data.get("show_confirmation", True)
-    if show_confirmation:
-        if city == "Владимир":
-            await message.answer(f"УХ ты! Мы с Вами земляки 😁")
-        else: 
-            await message.answer(f"{city}? Здорово! А я из Владимира")
-        await asyncio.sleep(1)
-        await state.update_data(show_confirmation=False)
-
-    # Переход к следующему вопросу
-    builder = ReplyKeyboardBuilder()
-    for btn in ["Владимир", "Суздаль", "Гусь-Хрустальный", "с. Муромцево", "пос. Боголюбово", "Юрьев-Польский", "Другое"]:
-        builder.add(types.KeyboardButton(text=btn))
-    builder.adjust(2)
-    
-    await message.answer(
-        "Какой город вы посетили?",
-        reply_markup=builder.as_markup(resize_keyboard=True)
-    )
-    await state.set_state(FeedbackStates.visited_city)
+    # 5. Если не мат, не город и не оффтопик - обработка как нераспознанный запрос
+    logging.warning("[process_home_city] Город не распознан и не оффтопик")
+    await message.answer("Не удалось распознать город. Пожалуйста, укажите в формате: «Москва», «Санкт-Петербург»")
     await timeout_manager.set(message.chat.id, state)
 
 @dp.message(FeedbackStates.visited_city)
@@ -1459,7 +1476,7 @@ async def main():
         sdk = YCloudML(folder_id=folder_id, auth=auth_token)
         logging.info("Yandex Cloud ML SDK initialized successfully")
         
-        model = sdk.models.completions(f"gpt://{folder_id}/yandexgpt-lite/latest")
+        model = sdk.models.completions(f"gpt://{folder_id}/yandexgpt-32k/latest")
         logging.info(f"Model initialized: {model}")
         
         assistant = sdk.assistants.create(model)
