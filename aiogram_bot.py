@@ -19,6 +19,11 @@ from pymorphy3 import MorphAnalyzer
 from transliterate import translit, detect_language
 from pathlib import Path
 from yandex_cloud_ml_sdk import YCloudML
+import aiosmtplib
+from aiohttp import ClientSession
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
+from email.mime.application import MIMEApplication
 
 # SQLAlchemy
 from sqlalchemy import create_engine, Column, Integer, String, Text, DateTime
@@ -214,6 +219,11 @@ load_dotenv()
 bot_token = os.getenv("BOT_TOKEN")
 folder_id = os.getenv("FOLDER_ID")
 auth_token = os.getenv("AUTH_TOKEN")
+SMTP_USERNAME = os.getenv("SMTP_USERNAME")
+SMTP_PASSWORD = os.getenv("SMTP_PASSWORD")
+SMTP_SERVER = os.getenv("SMTP_SERVER", "smtp.yandex.ru")
+SMTP_PORT = int(os.getenv("SMTP_PORT", 465))
+ADMIN_EMAIL = os.getenv("ADMIN_EMAIL")
 
 bot = Bot(token=bot_token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher(storage=MemoryStorage())
@@ -730,7 +740,7 @@ async def check_offtopic(message: types.Message, state: FSMContext) -> bool:
     return True
 
 async def extract_visited_cities(text: str, bot_instance: Bot) -> list[str]:
-    """Использует LLM для извлечения посещенных городов из текста с фильтрацией"""
+    """LLM для извлечения посещенных городов из текста с фильтрацией"""
     try:
         if not hasattr(bot_instance, 'assistant') or not bot_instance.assistant:
             logging.error("Yandex Cloud ML не инициализирован")
@@ -1466,6 +1476,224 @@ async def log_database_state():
             )
         logging.info("=== КОНЕЦ ОТЧЕТА ===")
 
+from collections import Counter
+
+async def generate_weekly_report(session: Session) -> tuple[str, dict]:
+    """Генерирует отчет с аналитикой"""
+    cutoff_date = datetime.utcnow() - timedelta(days=7)
+    feedbacks = session.query(Feedback).filter(
+        Feedback.timestamp >= cutoff_date,
+        Feedback.status == 'completed'
+    ).all()
+
+    if not feedbacks:
+        return None, None
+
+    # Собираем данные для аналитики
+    home_cities = []
+    visited_cities = []
+    
+    for feedback in feedbacks:
+        # Города проживания
+        if feedback.home_city:
+            home_cities.append(feedback.home_city.strip())
+            
+        # Посещенные города (могут быть через запятую)
+        if feedback.visited_city:
+            cities = [city.strip().title() for city in feedback.visited_city.split(',')]
+            visited_cities.extend(cities)
+
+    # Топ-5 городов проживания
+    home_counter = Counter(home_cities)
+    top_home = home_counter.most_common(5)
+
+    # Топ-5 посещенных городов
+    visited_counter = Counter(visited_cities)
+    top_visited = visited_counter.most_common(5)
+
+    # Генерация CSV
+    filename = f"weekly_report_{datetime.now().strftime('%d%m%Y')}.csv"
+    with open(filename, 'w', newline='', encoding='utf-8') as csvfile:
+        writer = csv.DictWriter(csvfile, fieldnames=[
+            'id', 'timestamp', 'gender', 'age_group', 
+            'home_city', 'visited_city', 'visited_events', 
+            'liked', 'disliked'
+        ])
+        writer.writeheader()
+        
+        for feedback in feedbacks:
+            writer.writerow({
+                'id': feedback.id,
+                'timestamp': feedback.timestamp.isoformat(),
+                'gender': feedback.gender,
+                'age_group': feedback.age_group,
+                'home_city': feedback.home_city,
+                'visited_city': feedback.visited_city,
+                'visited_events': feedback.visited_events,
+                'liked': feedback.liked,
+                'disliked': feedback.disliked
+            })
+
+    summary = {
+        'total': len(feedbacks),
+        'top_home_cities': top_home,
+        'top_visited_cities': top_visited,
+        'unique_home_cities_count': len(home_counter),
+        'unique_visited_cities_count': len(visited_counter)
+    }
+    
+    return filename, summary
+
+def format_city_stats(cities: list) -> str:
+    """Форматирует список городов для HTML с правильным склонением"""
+    def get_plural(number: int) -> str:
+        if number % 10 == 1 and number % 100 != 11:
+            return "посетитель"
+        elif 2 <= number % 10 <= 4 and (number % 100 < 10 or number % 100 >= 20):
+            return "посетителя"
+        else:
+            return "посетителей"
+
+    return "\n".join(
+        f"<li>{city} - {count} {get_plural(count)}" 
+        for city, count in cities
+    )
+
+async def send_email_with_report(filename: str, summary: dict) -> bool:
+    """Отправка письма с аналитикой"""
+    try:
+        msg = MIMEMultipart()
+        msg['From'] = SMTP_USERNAME
+        msg['To'] = ADMIN_EMAIL
+        msg['Subject'] = f"Отчет по отзывам ({datetime.now().strftime('%d.%m.%Y')})"
+
+        # HTML-тело письма с аналитикой
+        html = f"""
+        <html>
+            <body style="font-family: Arial, sans-serif;">
+                <h2 style="color: #2c3e50;">Недельный отчет по отзывам</h2>
+                
+                <div style="margin-bottom: 20px;">
+                    <h3 style="color: #3498db;">Основные показатели</h3>
+                    <p>• Всего отзывов: <strong>{summary['total']}</strong></p>
+                </div>
+                
+                <div style="margin-bottom: 20px;">
+                    <h3 style="color: #3498db;">Откуда чаще всего приезжают</h3>
+                    <ol>
+                        {format_city_stats(summary['top_home_cities'])}
+                    </ol>
+                </div>
+                
+                <div style="margin-bottom: 20px;">
+                    <h3 style="color: #3498db;">Самые часто посещаемые города</h3>
+                    <ol>
+                        {format_city_stats(summary['top_visited_cities'])}
+                    </ol>
+                </div>
+                
+                <p style="color: #7f8c8d;">
+                    <em>Отчет сформирован автоматически. Прикрепленный файл содержит полные данные.</em>
+                </p>
+            </body>
+        </html>
+        """
+        
+        msg.attach(MIMEText(html, 'html'))
+        
+        # Прикрепление CSV-файла
+        with open(filename, 'rb') as f:
+            part = MIMEApplication(f.read(), Name=filename)
+            part['Content-Disposition'] = f'attachment; filename="{filename}"'
+            msg.attach(part)
+
+        # Отправка через SMTP
+        async with aiosmtplib.SMTP(
+            hostname=SMTP_SERVER,
+            port=SMTP_PORT,
+            use_tls=True
+        ) as server:
+            await server.login(SMTP_USERNAME, SMTP_PASSWORD)
+            await server.send_message(msg)
+            
+        return True
+        
+    except Exception as e:
+        logging.error(f"Ошибка отправки: {e}", exc_info=True)
+        return False
+
+async def scheduled_weekly_task():
+    """Задача для планировщика"""
+    while True:
+        now = datetime.now()
+        # Запускаем каждую пятницу в 10:00
+        next_run = now + timedelta(days=(4 - now.weekday()) % 7)
+        next_run = next_run.replace(hour=10, minute=00, second=0, microsecond=0)
+        
+        if now > next_run:
+            next_run += timedelta(weeks=1)
+        
+        wait_seconds = (next_run - now).total_seconds()
+        # Для отладки - показать время следующего запуска
+        logging.info(f"Next report will be sent at: {next_run} (in {wait_seconds:.0f} seconds)")
+
+        await asyncio.sleep(wait_seconds)
+        
+        try:
+            with Session() as session:
+                filename, summary = await generate_weekly_report(session)
+                if filename:
+                    success = await send_email_with_report(filename, summary)
+                    if success:
+                        logging.info("Weekly report sent successfully")
+                    else:
+                        logging.error("Failed to send weekly report")
+        except Exception as e:
+            logging.error(f"Scheduled task error: {e}")
+
+async def test_send_email_now():
+    """Тестовая отправка реальных данных с аналитикой"""
+    try:
+        # Проверка конфигурации SMTP
+        if not all([SMTP_USERNAME, SMTP_PASSWORD, ADMIN_EMAIL]):
+            logging.error("SMTP параметры не настроены!")
+            return
+
+        logging.info("Начало тестовой отправки реальных данных...")
+        
+        with Session() as session:
+            # Генерация отчета с реальными данными
+            filename, summary = await generate_weekly_report(session)
+            
+            if not filename or not summary:
+                logging.warning("Нет данных для формирования отчета")
+                return
+
+            # Логирование собранной аналитики
+            logging.info(f"Сформирован отчет: {summary}")
+            
+            # Отправка письма
+            success = await send_email_with_report(filename, summary)
+            
+            if success:
+                logging.info("Письмо с реальными данными успешно отправлено!")
+            else:
+                logging.error("Ошибка при отправке письма")
+
+    except Exception as e:
+        logging.error(f"Критическая ошибка: {e}", exc_info=True)
+    finally:
+        # Обязательная очистка временных файлов
+        if filename and os.path.exists(filename):
+            try:
+                os.remove(filename)
+                logging.info(f"Временный файл {filename} удален")
+            except Exception as e:
+                logging.error(f"Ошибка удаления файла: {e}")
+
+        # Дополнительная информация в логах
+        logging.info("Тестовая отправка завершена\n" + "="*50)
+
 async def main():
     # Стартовая очистка
     try:
@@ -1475,6 +1703,8 @@ async def main():
         logging.info(f"Стартовая очистка: удалено abandoned записей: {purged}")
     except Exception as e:
         logging.error(f"Ошибка стартовой очистки: {e}")
+
+    await test_send_email_now()
 
     try:
         sdk = YCloudML(folder_id=folder_id, auth=auth_token)
@@ -1487,7 +1717,7 @@ async def main():
         logging.info(f"Assistant created: {assistant}")
 
         instruction = """
-        Ты помощник для определения оффтопных вопросов. Твоя задача:
+        Ты бобр-виртуальный помощник для определения оффтопных вопросов. Твоя задача:
         1. Определять, относится ли вопрос к одному из 4 типов оффтопика
         2. Возвращать только ключ темы (who_are_you/hobby/about_museum/favorite_food) или null
         """
@@ -1508,6 +1738,7 @@ async def main():
     await log_database_state()
     # Запускаем фоновую задачу очистки
     asyncio.create_task(periodic_cleanup())
+    asyncio.create_task(scheduled_weekly_task())
     
     try:
         logging.info("Запуск бота...")
