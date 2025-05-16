@@ -1,3 +1,5 @@
 .env
 bad_words.txt
 output_names.json
+feedback.csv
+feedback.db
